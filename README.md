@@ -1,5 +1,6 @@
 ﻿# unity-gps-rtk
 1. Run the py script on the PI with the following args:
+
 sudo python3 gps.py \
 -u rtkusername \
 -p rtkpassword \
