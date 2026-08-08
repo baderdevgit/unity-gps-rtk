@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet --version)",
+      "Bash(dotnet new *)",
+      "Bash(dotnet build *)",
+      "Bash(python3 -m py_compile \"C:\\\\Users\\\\bader\\\\OneDrive\\\\Desktop\\\\Projects\\\\Domain-Expansion-Server\\\\PiScript\\\\gps.py\")",
+      "Bash(python -m py_compile \"C:\\\\Users\\\\bader\\\\OneDrive\\\\Desktop\\\\Projects\\\\Domain-Expansion-Server\\\\PiScript\\\\gps.py\")"
+    ]
+  }
+}
