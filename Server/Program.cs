@@ -23,12 +23,13 @@ string indexHtml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "wwwr
 var unityClients = new List<TcpClient>();
 var unityClientsLock = new object();
 var snapshots = new SnapshotStore();
+var latestFix = new TextStore();
 
 _ = Task.Run(() => RunUnityListener(unityPort, unityClients, unityClientsLock));
-_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityClients, unityClientsLock, snapshots));
-await RunPiListener(piPort, unityClients, unityClientsLock);
+_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityClients, unityClientsLock, snapshots, latestFix));
+await RunPiListener(piPort, unityClients, unityClientsLock, latestFix);
 
-static async Task RunPiListener(int port, List<TcpClient> unityClients, object unityClientsLock)
+static async Task RunPiListener(int port, List<TcpClient> unityClients, object unityClientsLock, TextStore latestFix)
 {
     var listener = new TcpListener(IPAddress.Any, port);
     listener.Start();
@@ -38,11 +39,11 @@ static async Task RunPiListener(int port, List<TcpClient> unityClients, object u
     {
         var client = await listener.AcceptTcpClientAsync();
         Console.WriteLine($"Pi connected from {client.Client.RemoteEndPoint}");
-        _ = Task.Run(() => HandlePiClient(client, unityClients, unityClientsLock));
+        _ = Task.Run(() => HandlePiClient(client, unityClients, unityClientsLock, latestFix));
     }
 }
 
-static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients, object unityClientsLock)
+static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients, object unityClientsLock, TextStore latestFix)
 {
     using (client)
     using (var stream = client.GetStream())
@@ -54,6 +55,7 @@ static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients,
             while ((line = await reader.ReadLineAsync()) != null)
             {
                 Console.WriteLine($"Received from Pi: {line}");
+                latestFix.Set(line);
                 BroadcastToUnity(line, unityClients, unityClientsLock);
             }
         }
@@ -102,7 +104,7 @@ static async Task RunUnityListener(int port, List<TcpClient> unityClients, objec
     }
 }
 
-static async Task RunWebServer(int port, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots)
+static async Task RunWebServer(int port, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots, TextStore latestFix)
 {
     var listener = new HttpListener();
     listener.Prefixes.Add($"http://+:{port}/");
@@ -122,11 +124,11 @@ static async Task RunWebServer(int port, string token, string indexHtml, List<Tc
     while (true)
     {
         var ctx = await listener.GetContextAsync();
-        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityClients, unityClientsLock, snapshots));
+        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityClients, unityClientsLock, snapshots, latestFix));
     }
 }
 
-static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots)
+static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots, TextStore latestFix)
 {
     try
     {
@@ -177,6 +179,19 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 200, "image/jpeg", jpg);
                 break;
 
+            case "/gps.json":
+                if (req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                var fix = latestFix.Get();
+                if (fix == null)
+                    await WriteResponse(res, 404, "text/plain", Encoding.UTF8.GetBytes("No fix yet"));
+                else
+                    await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(fix));
+                break;
+
             default:
                 await WriteResponse(res, 404, "text/plain", Encoding.UTF8.GetBytes("Not found"));
                 break;
@@ -204,4 +219,12 @@ class SnapshotStore
     private byte[] _data = Array.Empty<byte>();
     public void Set(byte[] data) { lock (_lock) _data = data; }
     public byte[] Get() { lock (_lock) return _data; }
+}
+
+class TextStore
+{
+    private readonly object _lock = new();
+    private string? _data;
+    public void Set(string data) { lock (_lock) _data = data; }
+    public string? Get() { lock (_lock) return _data; }
 }

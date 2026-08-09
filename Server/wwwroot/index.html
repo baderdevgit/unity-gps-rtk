@@ -10,12 +10,15 @@
   button { font-size:1.5em; padding:16px 32px; border-radius:8px; border:none; background:#c0392b; color:#fff; margin-top:16px; }
   button:active { background:#992d22; }
   #status { margin-top:8px; color:#9a9; }
+  #gps { margin-top:12px; font-size:1.1em; color:#eee; }
+  #gps .stale { color:#888; }
 </style>
 </head>
 <body>
 <h2>Drone Control</h2>
 <button id="resetBtn">Reset Marker Position</button>
 <div id="status"></div>
+<div id="gps">Waiting for fix...</div>
 <img id="preview" src="" alt="camera preview">
 <script>
   const params = new URLSearchParams(location.search);
@@ -38,6 +41,20 @@
   }
   setInterval(refreshPreview, 1500);
   refreshPreview();
+
+  const gps = document.getElementById('gps');
+  async function refreshGps() {
+    try {
+      const res = await fetch('/gps.json?token=' + encodeURIComponent(token) + '&t=' + Date.now());
+      if (!res.ok) return;
+      const fix = await res.json();
+      gps.textContent = `Lat: ${fix.lat.toFixed(7)}  Lon: ${fix.lon.toFixed(7)}  (${fix.fixStatus})`;
+    } catch (e) {
+      // leave last-known value on screen rather than blanking it
+    }
+  }
+  setInterval(refreshGps, 1500);
+  refreshGps();
 </script>
 </body>
 </html>
