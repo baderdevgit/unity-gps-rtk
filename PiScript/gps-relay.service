@@ -1,0 +1,16 @@
+[Unit]
+Description=GPS NTRIP client + Domain-Expansion-Server relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/baddy/Desktop
+ExecStart=/home/baddy/Desktop/run_gps.sh
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
