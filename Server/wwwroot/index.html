@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drone Control</title>
+<style>
+  body { font-family: sans-serif; background:#111; color:#eee; text-align:center; padding:20px; }
+  img { width:100%; max-width:480px; border-radius:8px; margin-top:16px; background:#000; }
+  button { font-size:1.5em; padding:16px 32px; border-radius:8px; border:none; background:#c0392b; color:#fff; margin-top:16px; }
+  button:active { background:#992d22; }
+  #status { margin-top:8px; color:#9a9; }
+</style>
+</head>
+<body>
+<h2>Drone Control</h2>
+<button id="resetBtn">Reset Marker Position</button>
+<div id="status"></div>
+<img id="preview" src="" alt="camera preview">
+<script>
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token') || '';
+  const status = document.getElementById('status');
+  const preview = document.getElementById('preview');
+
+  document.getElementById('resetBtn').onclick = async () => {
+    status.textContent = 'Resetting...';
+    try {
+      const res = await fetch('/reset?token=' + encodeURIComponent(token), { method: 'POST' });
+      status.textContent = res.ok ? 'Reset sent.' : 'Failed: ' + res.status;
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  function refreshPreview() {
+    preview.src = '/snapshot.jpg?token=' + encodeURIComponent(token) + '&t=' + Date.now();
+  }
+  setInterval(refreshPreview, 1500);
+  refreshPreview();
+</script>
+</body>
+</html>

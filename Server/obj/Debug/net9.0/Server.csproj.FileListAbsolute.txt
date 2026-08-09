@@ -13,3 +13,4 @@ C:\Users\bader\OneDrive\Desktop\Projects\Domain-Expansion-Server\Server\obj\Debu
 C:\Users\bader\OneDrive\Desktop\Projects\Domain-Expansion-Server\Server\obj\Debug\net9.0\Server.genruntimeconfig.cache
 C:\Users\bader\OneDrive\Desktop\Projects\Domain-Expansion-Server\Server\obj\Debug\net9.0\ref\Server.dll
 C:\Users\bader\OneDrive\Desktop\Projects\Domain-Expansion-Server\Server\obj\Debug\net9.0\Server.sourcelink.json
+C:\Users\bader\OneDrive\Desktop\Projects\Domain-Expansion-Server\Server\bin\Debug\net9.0\wwwroot\index.html
