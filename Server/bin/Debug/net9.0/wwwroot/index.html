@@ -3,14 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Drone Control</title>
+<title>GPS Control</title>
 <style>
   body { font-family: sans-serif; background:#111; color:#eee; text-align:center; padding:20px; }
   img { width:100%; max-width:480px; border-radius:8px; margin-top:16px; background:#000; }
   button { font-size:1.5em; padding:16px 32px; border-radius:8px; border:none; background:#c0392b; color:#fff; margin-top:16px; }
   button:active { background:#992d22; }
+  .row { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-top:16px; }
+  .row button { margin-top:0; font-size:1.1em; padding:14px 20px; flex:1 1 0; max-width:200px; }
   #logBtn { background:#2980b9; }
   #logBtn:active { background:#20628e; }
+  #clearLogBtn { background:#7f8c8d; }
+  #clearLogBtn:active { background:#616a6b; }
+  #placeBtn { background:#27ae60; }
+  #placeBtn:active { background:#1e8449; }
+  #clearBtn { background:#7f8c8d; }
+  #clearBtn:active { background:#616a6b; }
   #status { margin-top:8px; color:#9a9; }
   #gps { margin-top:12px; font-size:1.1em; color:#eee; }
   #gps .stale { color:#888; }
@@ -20,10 +28,17 @@
 </style>
 </head>
 <body>
-<h2>GPS Control</h2>
+<h2>Drone Control</h2>
 <img id="preview" src="" alt="camera preview">
 <button id="resetBtn">Reset Marker Position</button>
-<button id="logBtn">Log Position</button>
+<div class="row">
+  <button id="logBtn">Log Position</button>
+  <button id="clearLogBtn">Clear Logged Positions</button>
+</div>
+<div class="row">
+  <button id="placeBtn">Place Marker</button>
+  <button id="clearBtn">Clear Markers</button>
+</div>
 <div id="status"></div>
 <div id="gps">Waiting for fix...</div>
 <ul id="loggedList"></ul>
@@ -87,6 +102,37 @@
       const res = await fetch('/log-position?token=' + encodeURIComponent(token), { method: 'POST' });
       status.textContent = res.ok ? 'Position logged.' : 'Failed: ' + res.status;
       if (res.ok) refreshLoggedPositions();
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  document.getElementById('clearLogBtn').onclick = async () => {
+    status.textContent = 'Clearing logged positions...';
+    try {
+      const res = await fetch('/clear-logged-positions?token=' + encodeURIComponent(token), { method: 'POST' });
+      status.textContent = res.ok ? 'Logged positions cleared.' : 'Failed: ' + res.status;
+      if (res.ok) refreshLoggedPositions();
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  document.getElementById('placeBtn').onclick = async () => {
+    status.textContent = 'Placing marker...';
+    try {
+      const res = await fetch('/place-marker?token=' + encodeURIComponent(token), { method: 'POST' });
+      status.textContent = res.ok ? 'Marker placed.' : 'Failed: ' + res.status;
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  document.getElementById('clearBtn').onclick = async () => {
+    status.textContent = 'Clearing markers...';
+    try {
+      const res = await fetch('/clear-markers?token=' + encodeURIComponent(token), { method: 'POST' });
+      status.textContent = res.ok ? 'Markers cleared.' : 'Failed: ' + res.status;
     } catch (e) {
       status.textContent = 'Error: ' + e;
     }

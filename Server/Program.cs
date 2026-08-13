@@ -167,6 +167,28 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
 
+            case "/place-marker":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                BroadcastToUnity("{\"type\":\"place\"}", unityClients, unityClientsLock);
+                Console.WriteLine("Place marker requested from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
+            case "/clear-markers":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                BroadcastToUnity("{\"type\":\"clear\"}", unityClients, unityClientsLock);
+                Console.WriteLine("Clear markers requested from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
             case "/snapshot":
                 if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
                 {
@@ -225,6 +247,20 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 }
                 Console.WriteLine($"Logged position from web UI: {fixToLog}");
                 await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(fixToLog));
+                break;
+
+            case "/clear-logged-positions":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                lock (loggedPositionsLock)
+                {
+                    File.WriteAllText(loggedPositionsPath, string.Empty);
+                }
+                Console.WriteLine("Logged positions cleared from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
 
             case "/logged-positions.json":
