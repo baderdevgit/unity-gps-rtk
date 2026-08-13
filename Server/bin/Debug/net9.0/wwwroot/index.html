@@ -9,17 +9,24 @@
   img { width:100%; max-width:480px; border-radius:8px; margin-top:16px; background:#000; }
   button { font-size:1.5em; padding:16px 32px; border-radius:8px; border:none; background:#c0392b; color:#fff; margin-top:16px; }
   button:active { background:#992d22; }
+  #logBtn { background:#2980b9; }
+  #logBtn:active { background:#20628e; }
   #status { margin-top:8px; color:#9a9; }
   #gps { margin-top:12px; font-size:1.1em; color:#eee; }
   #gps .stale { color:#888; }
+  #loggedList { list-style:none; padding:0; margin:12px auto 0; max-width:480px; max-height:220px; overflow-y:auto; text-align:left; font-family:monospace; font-size:0.85em; }
+  #loggedList li { padding:6px 8px; border-bottom:1px solid #333; }
+  #loggedList li:nth-child(odd) { background:#1a1a1a; }
 </style>
 </head>
 <body>
-<h2>Drone Control</h2>
+<h2>GPS Control</h2>
+<img id="preview" src="" alt="camera preview">
 <button id="resetBtn">Reset Marker Position</button>
+<button id="logBtn">Log Position</button>
 <div id="status"></div>
 <div id="gps">Waiting for fix...</div>
-<img id="preview" src="" alt="camera preview">
+<ul id="loggedList"></ul>
 <script>
   const params = new URLSearchParams(location.search);
   const token = params.get('token') || '';
@@ -55,6 +62,35 @@
   }
   setInterval(refreshGps, 1500);
   refreshGps();
+
+  const loggedList = document.getElementById('loggedList');
+  async function refreshLoggedPositions() {
+    try {
+      const res = await fetch('/logged-positions.json?token=' + encodeURIComponent(token) + '&t=' + Date.now());
+      if (!res.ok) return;
+      const positions = await res.json();
+      loggedList.innerHTML = '';
+      positions.slice().reverse().forEach((fix, i) => {
+        const li = document.createElement('li');
+        li.textContent = `#${positions.length - i}  ${fix.lat.toFixed(7)}, ${fix.lon.toFixed(7)}  (${fix.fixStatus})`;
+        loggedList.appendChild(li);
+      });
+    } catch (e) {
+      // leave the existing list on screen
+    }
+  }
+  refreshLoggedPositions();
+
+  document.getElementById('logBtn').onclick = async () => {
+    status.textContent = 'Logging...';
+    try {
+      const res = await fetch('/log-position?token=' + encodeURIComponent(token), { method: 'POST' });
+      status.textContent = res.ok ? 'Position logged.' : 'Failed: ' + res.status;
+      if (res.ok) refreshLoggedPositions();
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
 </script>
 </body>
 </html>

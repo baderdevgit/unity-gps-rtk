@@ -357,7 +357,16 @@ class NtripClient(object):
                     import ssl as ssl_module
                     self.socket = ssl_module.wrap_socket(self.socket)
 
-                error_indicator = self.socket.connect_ex((self.caster, self.port))
+                try:
+                    error_indicator = self.socket.connect_ex((self.caster, self.port))
+                except OSError as e:
+                    # connect_ex() normally reports connection failures via its
+                    # return code, but DNS lookup failures (e.g. right after
+                    # boot, before the network's DNS is fully up) raise instead
+                    # - fold that into the same retry path rather than crashing.
+                    if self.verbose:
+                        sys.stderr.write("Connection to caster failed: %s\n" % e)
+                    error_indicator = -1
                 if error_indicator == 0:
                     sleepTime = 1
                     connectTime = datetime.datetime.now()

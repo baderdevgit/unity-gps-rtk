@@ -5,7 +5,19 @@
       "Bash(dotnet new *)",
       "Bash(dotnet build *)",
       "Bash(python3 -m py_compile \"C:\\\\Users\\\\bader\\\\OneDrive\\\\Desktop\\\\Projects\\\\Domain-Expansion-Server\\\\PiScript\\\\gps.py\")",
-      "Bash(python -m py_compile \"C:\\\\Users\\\\bader\\\\OneDrive\\\\Desktop\\\\Projects\\\\Domain-Expansion-Server\\\\PiScript\\\\gps.py\")"
+      "Bash(python -m py_compile \"C:\\\\Users\\\\bader\\\\OneDrive\\\\Desktop\\\\Projects\\\\Domain-Expansion-Server\\\\PiScript\\\\gps.py\")",
+      "Bash(ffmpeg -version)",
+      "PowerShell(ffmpeg -version)",
+      "PowerShell(winget list --id Gyan.FFmpeg 2>&1)",
+      "PowerShell(winget install --id Gyan.FFmpeg -e --source winget --accept-package-agreements --accept-source-agreements)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); ffmpeg -version | Select-Object -First 3)",
+      "Bash(ls -la \"/c/Users/bader/Downloads/Top 40 Viral TikTok Sound Effects For Editing \\(2026\\).mp3\")",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); \\(Get-Command ffprobe\\).Source)",
+      "Bash(mkdir -p \"/c/Users/bader/AppData/Local/Temp/claude/C--Users-bader-OneDrive-Desktop-Projects-Domain-Expansion-Server/d9d0575f-92b8-4f71-8c93-cd25899b9538/scratchpad/tiktok_sfx_clips\")",
+      "Bash(python \"C:\\\\Users\\\\bader\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-bader-OneDrive-Desktop-Projects-Domain-Expansion-Server\\\\d9d0575f-92b8-4f71-8c93-cd25899b9538\\\\scratchpad\\\\split_clips.py\")",
+      "Bash(mkdir -p \"/c/Users/bader/OneDrive/Desktop/footage/SFX/TickTok SFX\")",
+      "Bash(cp \"/c/Users/bader/AppData/Local/Temp/claude/C--Users-bader-OneDrive-Desktop-Projects-Domain-Expansion-Server/d9d0575f-92b8-4f71-8c93-cd25899b9538/scratchpad/tiktok_sfx_clips/\"*.mp3 \"/c/Users/bader/OneDrive/Desktop/footage/SFX/TickTok SFX/\")",
+      "Read(//c/Users/bader/OneDrive/Desktop/footage/SFX/TickTok SFX//**)"
     ]
   }
 }

@@ -12,6 +12,6 @@ exec python3 -u gps3.py \
   -r 20 \
   --relayhost 65.184.36.188 \
   --relayport 5002 \
-  rtn.nc.gov \
+  207.4.96.201 \
   2101 \
   VRS_RTCM34_MSM4

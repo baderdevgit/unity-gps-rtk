@@ -20,16 +20,27 @@ if (authToken == "changeme-please-set-a-real-token")
 
 string indexHtml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html"));
 
+// Every fix line the Pi sends gets appended here, one JSON object per line,
+// so past readings can be reviewed later (e.g. for accuracy testing).
+string gpsLogPath = Path.Combine(AppContext.BaseDirectory, "gps_log.jsonl");
+var gpsLogLock = new object();
+Console.WriteLine($"Logging GPS fixes to {gpsLogPath}");
+
+// Separate from gpsLogPath above: this only gets a line added when the
+// mobile UI's "Log Position" button is pressed, not on every fix.
+string loggedPositionsPath = Path.Combine(AppContext.BaseDirectory, "logged_positions.jsonl");
+var loggedPositionsLock = new object();
+
 var unityClients = new List<TcpClient>();
 var unityClientsLock = new object();
 var snapshots = new SnapshotStore();
 var latestFix = new TextStore();
 
 _ = Task.Run(() => RunUnityListener(unityPort, unityClients, unityClientsLock));
-_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityClients, unityClientsLock, snapshots, latestFix));
-await RunPiListener(piPort, unityClients, unityClientsLock, latestFix);
+_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityClients, unityClientsLock, snapshots, latestFix, loggedPositionsPath, loggedPositionsLock));
+await RunPiListener(piPort, unityClients, unityClientsLock, latestFix, gpsLogPath, gpsLogLock);
 
-static async Task RunPiListener(int port, List<TcpClient> unityClients, object unityClientsLock, TextStore latestFix)
+static async Task RunPiListener(int port, List<TcpClient> unityClients, object unityClientsLock, TextStore latestFix, string gpsLogPath, object gpsLogLock)
 {
     var listener = new TcpListener(IPAddress.Any, port);
     listener.Start();
@@ -39,11 +50,11 @@ static async Task RunPiListener(int port, List<TcpClient> unityClients, object u
     {
         var client = await listener.AcceptTcpClientAsync();
         Console.WriteLine($"Pi connected from {client.Client.RemoteEndPoint}");
-        _ = Task.Run(() => HandlePiClient(client, unityClients, unityClientsLock, latestFix));
+        _ = Task.Run(() => HandlePiClient(client, unityClients, unityClientsLock, latestFix, gpsLogPath, gpsLogLock));
     }
 }
 
-static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients, object unityClientsLock, TextStore latestFix)
+static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients, object unityClientsLock, TextStore latestFix, string gpsLogPath, object gpsLogLock)
 {
     using (client)
     using (var stream = client.GetStream())
@@ -56,6 +67,10 @@ static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients,
             {
                 Console.WriteLine($"Received from Pi: {line}");
                 latestFix.Set(line);
+                lock (gpsLogLock)
+                {
+                    File.AppendAllText(gpsLogPath, line + "\n");
+                }
                 BroadcastToUnity(line, unityClients, unityClientsLock);
             }
         }
@@ -104,7 +119,7 @@ static async Task RunUnityListener(int port, List<TcpClient> unityClients, objec
     }
 }
 
-static async Task RunWebServer(int port, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots, TextStore latestFix)
+static async Task RunWebServer(int port, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots, TextStore latestFix, string loggedPositionsPath, object loggedPositionsLock)
 {
     var listener = new HttpListener();
     listener.Prefixes.Add($"http://+:{port}/");
@@ -124,11 +139,11 @@ static async Task RunWebServer(int port, string token, string indexHtml, List<Tc
     while (true)
     {
         var ctx = await listener.GetContextAsync();
-        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityClients, unityClientsLock, snapshots, latestFix));
+        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityClients, unityClientsLock, snapshots, latestFix, loggedPositionsPath, loggedPositionsLock));
     }
 }
 
-static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots, TextStore latestFix)
+static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots, TextStore latestFix, string loggedPositionsPath, object loggedPositionsLock)
 {
     try
     {
@@ -190,6 +205,43 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 404, "text/plain", Encoding.UTF8.GetBytes("No fix yet"));
                 else
                     await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(fix));
+                break;
+
+            case "/log-position":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                var fixToLog = latestFix.Get();
+                if (fixToLog == null)
+                {
+                    await WriteResponse(res, 404, "text/plain", Encoding.UTF8.GetBytes("No fix yet"));
+                    break;
+                }
+                lock (loggedPositionsLock)
+                {
+                    File.AppendAllText(loggedPositionsPath, fixToLog + "\n");
+                }
+                Console.WriteLine($"Logged position from web UI: {fixToLog}");
+                await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(fixToLog));
+                break;
+
+            case "/logged-positions.json":
+                if (req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                string[] loggedLines;
+                lock (loggedPositionsLock)
+                {
+                    loggedLines = File.Exists(loggedPositionsPath)
+                        ? File.ReadAllLines(loggedPositionsPath)
+                        : Array.Empty<string>();
+                }
+                var json = "[" + string.Join(",", loggedLines.Where(l => l.Length > 0)) + "]";
+                await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(json));
                 break;
 
             default:
