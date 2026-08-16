@@ -389,9 +389,7 @@ class NtripClient(object):
             dt = now - last_time
             last_time = now
 
-            # Negated: the board is mounted upside-down, so its Z-axis points
-            # down instead of up, flipping the sign of the raw yaw rate.
-            gyro_z = -(read_gyro_z(self.imu_bus) - self.gyro_bias)
+            gyro_z = read_gyro_z(self.imu_bus) - self.gyro_bias
             with self.heading_lock:
                 self.heading = (self.heading + gyro_z * dt) % 360
                 heading = self.heading

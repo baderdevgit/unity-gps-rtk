@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <None Include="wwwroot\index.html" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\PiScript\gps.py" Link="gps.py" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

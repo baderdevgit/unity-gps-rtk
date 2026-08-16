@@ -280,6 +280,24 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(json));
                 break;
 
+            case "/gps.py":
+                if (req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                // Read fresh every request (not cached at startup like indexHtml)
+                // so an edited gps.py is available to curl without restarting the server.
+                string scriptPath = Path.Combine(AppContext.BaseDirectory, "gps.py");
+                if (!File.Exists(scriptPath))
+                {
+                    await WriteResponse(res, 404, "text/plain", Encoding.UTF8.GetBytes("gps.py not found on server"));
+                    break;
+                }
+                byte[] scriptBytes = await File.ReadAllBytesAsync(scriptPath);
+                await WriteResponse(res, 200, "text/x-python", scriptBytes);
+                break;
+
             default:
                 await WriteResponse(res, 404, "text/plain", Encoding.UTF8.GetBytes("Not found"));
                 break;
