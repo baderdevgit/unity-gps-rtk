@@ -66,10 +66,17 @@ static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients,
             while ((line = await reader.ReadLineAsync()) != null)
             {
                 Console.WriteLine($"Received from Pi: {line}");
-                latestFix.Set(line);
-                lock (gpsLogLock)
+                // Control/IMU messages (e.g. {"type":"imu",...} at ~10Hz) share
+                // this same relay connection but aren't real GPS fixes - only
+                // cache/log the real ones, or the mobile page's readout would
+                // mostly be reading stale/incomplete IMU data instead.
+                if (!line.Contains("\"type\":"))
                 {
-                    File.AppendAllText(gpsLogPath, line + "\n");
+                    latestFix.Set(line);
+                    lock (gpsLogLock)
+                    {
+                        File.AppendAllText(gpsLogPath, line + "\n");
+                    }
                 }
                 BroadcastToUnity(line, unityClients, unityClientsLock);
             }
@@ -186,6 +193,28 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 }
                 BroadcastToUnity("{\"type\":\"clear\"}", unityClients, unityClientsLock);
                 Console.WriteLine("Clear markers requested from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
+            case "/start-recording":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                BroadcastToUnity("{\"type\":\"start-recording\"}", unityClients, unityClientsLock);
+                Console.WriteLine("Start recording requested from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
+            case "/stop-recording":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                BroadcastToUnity("{\"type\":\"stop-recording\"}", unityClients, unityClientsLock);
+                Console.WriteLine("Stop recording requested from web UI.");
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
 

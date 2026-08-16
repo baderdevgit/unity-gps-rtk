@@ -5,12 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GPS Controller</title>
 <style>
-  body { font-family: sans-serif; background:#111; color:#eee; text-align:center; padding:20px; }
+  body { font-family: sans-serif; background:#111; color:#eee; text-align:center; padding:20px; max-width:480px; margin:0 auto; box-sizing:border-box; }
   img { width:100%; max-width:480px; border-radius:8px; margin-top:16px; background:#000; }
-  button { font-size:1.5em; padding:16px 32px; border-radius:8px; border:none; background:#c0392b; color:#fff; margin-top:16px; }
+  button { width:100%; box-sizing:border-box; font-size:1.5em; padding:16px 32px; border-radius:8px; border:none; background:#c0392b; color:#fff; margin-top:16px; }
   button:active { background:#992d22; }
-  .row { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-top:16px; }
-  .row button { margin-top:0; font-size:1.1em; padding:14px 20px; flex:1 1 0; max-width:200px; }
+  #resetBtn { background:#2980b9; }
+  #resetBtn:active { background:#20628e; }
+  .row { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-top:16px; width:100%; }
+  .row button { width:auto; margin-top:0; font-size:1.1em; padding:14px 20px; flex:1 1 0; }
   #logBtn { background:#2980b9; }
   #logBtn:active { background:#20628e; }
   #clearLogBtn { background:#7f8c8d; }
@@ -19,6 +21,8 @@
   #placeBtn:active { background:#1e8449; }
   #clearBtn { background:#7f8c8d; }
   #clearBtn:active { background:#616a6b; }
+  #recordToggleBtn.recording { background:#7f8c8d; }
+  #recordToggleBtn.recording:active { background:#616a6b; }
   #status { margin-top:8px; color:#9a9; }
   #gps { margin-top:12px; font-size:1.1em; color:#eee; }
   #gps .stale { color:#888; }
@@ -28,10 +32,10 @@
 </style>
 </head>
 <body>
-<h2>Drone Control</h2>
+<h2>GPS Controller</h2>
 <img id="preview" src="" alt="camera preview">
-<button id="resetBtn">Reset Marker Position</button>
-<div class="row">
+<button id="resetBtn">Zero-Out Player Position</button>
+<div class="row" style="display:none">
   <button id="logBtn">Log Position</button>
   <button id="clearLogBtn">Clear Logged Positions</button>
 </div>
@@ -39,9 +43,10 @@
   <button id="placeBtn">Place Marker</button>
   <button id="clearBtn">Clear Markers</button>
 </div>
+<button id="recordToggleBtn">Start Recording</button>
 <div id="status"></div>
 <div id="gps">Waiting for fix...</div>
-<ul id="loggedList"></ul>
+<ul id="loggedList" style="display:none"></ul>
 <script>
   const params = new URLSearchParams(location.search);
   const token = params.get('token') || '';
@@ -133,6 +138,26 @@
     try {
       const res = await fetch('/clear-markers?token=' + encodeURIComponent(token), { method: 'POST' });
       status.textContent = res.ok ? 'Markers cleared.' : 'Failed: ' + res.status;
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  let isRecording = false;
+  const recordToggleBtn = document.getElementById('recordToggleBtn');
+  recordToggleBtn.onclick = async () => {
+    const endpoint = isRecording ? '/stop-recording' : '/start-recording';
+    status.textContent = isRecording ? 'Stopping recording...' : 'Starting recording...';
+    try {
+      const res = await fetch(endpoint + '?token=' + encodeURIComponent(token), { method: 'POST' });
+      if (res.ok) {
+        isRecording = !isRecording;
+        recordToggleBtn.textContent = isRecording ? 'Stop Recording' : 'Start Recording';
+        recordToggleBtn.classList.toggle('recording', isRecording);
+        status.textContent = isRecording ? 'Recording started.' : 'Recording stopped.';
+      } else {
+        status.textContent = 'Failed: ' + res.status;
+      }
     } catch (e) {
       status.textContent = 'Error: ' + e;
     }
