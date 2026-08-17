@@ -19,7 +19,8 @@
       "Bash(cp \"/c/Users/bader/AppData/Local/Temp/claude/C--Users-bader-OneDrive-Desktop-Projects-Domain-Expansion-Server/d9d0575f-92b8-4f71-8c93-cd25899b9538/scratchpad/tiktok_sfx_clips/\"*.mp3 \"/c/Users/bader/OneDrive/Desktop/footage/SFX/TickTok SFX/\")",
       "Read(//c/Users/bader/OneDrive/Desktop/footage/SFX/TickTok SFX//**)",
       "Bash(wc -l \"C:/Users/bader/AppData/LocalLow/DefaultCompany/domain_expansion/Sessions/scene_20260816_195606.jsonl\")",
-      "Read(//c/Users/bader/AppData/Roaming/Code/User/**)"
+      "Read(//c/Users/bader/AppData/Roaming/Code/User/**)",
+      "Bash(git rm *)"
     ]
   }
 }
