@@ -218,6 +218,22 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
 
+            case "/grid-size":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                if (!int.TryParse(req.QueryString["cells"], out int cells) || cells < 1)
+                {
+                    await WriteResponse(res, 400, "text/plain", Encoding.UTF8.GetBytes("Invalid cells value"));
+                    break;
+                }
+                BroadcastToUnity($"{{\"type\":\"grid-size\",\"cells\":{cells}}}", unityClients, unityClientsLock);
+                Console.WriteLine($"Grid size ({cells}) requested from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
             case "/snapshot":
                 if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
                 {

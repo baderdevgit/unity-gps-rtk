@@ -29,6 +29,9 @@
   #loggedList { list-style:none; padding:0; margin:12px auto 0; max-width:480px; max-height:220px; overflow-y:auto; text-align:left; font-family:monospace; font-size:0.85em; }
   #loggedList li { padding:6px 8px; border-bottom:1px solid #333; }
   #loggedList li:nth-child(odd) { background:#1a1a1a; }
+  #gridSizeRow { margin-top:16px; text-align:left; }
+  #gridSizeRow label { font-size:1.1em; }
+  #gridSizeSlider { width:100%; accent-color:#2980b9; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -44,6 +47,10 @@
   <button id="clearBtn">Clear Markers</button>
 </div>
 <button id="recordToggleBtn">Start Recording</button>
+<div id="gridSizeRow">
+  <label for="gridSizeSlider">Grid Cells: <span id="gridSizeValue">5</span></label>
+  <input type="range" id="gridSizeSlider" min="1" max="40" step="1" value="5">
+</div>
 <div id="status"></div>
 <div id="gps">Waiting for fix...</div>
 <ul id="loggedList" style="display:none"></ul>
@@ -158,6 +165,21 @@
       } else {
         status.textContent = 'Failed: ' + res.status;
       }
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  const gridSizeSlider = document.getElementById('gridSizeSlider');
+  const gridSizeValue = document.getElementById('gridSizeValue');
+  gridSizeSlider.oninput = () => {
+    gridSizeValue.textContent = gridSizeSlider.value;
+  };
+  gridSizeSlider.onchange = async () => {
+    status.textContent = 'Updating grid size...';
+    try {
+      const res = await fetch('/grid-size?token=' + encodeURIComponent(token) + '&cells=' + gridSizeSlider.value, { method: 'POST' });
+      status.textContent = res.ok ? 'Grid size updated.' : 'Failed: ' + res.status;
     } catch (e) {
       status.textContent = 'Error: ' + e;
     }
