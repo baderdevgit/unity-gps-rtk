@@ -272,6 +272,7 @@ class NtripClient(object):
         self.heading_lock = threading.Lock()
         self.last_position = None
         self.last_gga_raw = None
+        self.fix_seq = 0
         try:
             bus = SMBus(1)
             bus.write_byte_data(MPU6050_ADDR, MPU6050_PWR_MGMT_1, 0)
@@ -571,6 +572,10 @@ class NtripClient(object):
                                         heading = self.heading
 
                                     if self.relay:
+                                        self.fix_seq += 1
+                                        seq = self.fix_seq
+                                        ts = datetime.datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
+                                        sys.stderr.write("[%s] [SEQ] Pi sending fix #%d\n" % (ts, seq))
                                         self.relay.send({
                                             "lat": lat,
                                             "lon": lon,
@@ -579,6 +584,7 @@ class NtripClient(object):
                                             "fixStatus": fix_status,
                                             "heading": heading,
                                             "timestamp": time.time(),
+                                            "seq": seq,
                                         })
                                 if self.gps_file:
                                     self.gps_file.write(raw_data)

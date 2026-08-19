@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.RegularExpressions;
 
 const int piPort = 5002;
 const int unityPort = 5001;
@@ -92,6 +93,14 @@ static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients,
                     {
                         File.AppendAllText(gpsLogPath, line + "\n");
                     }
+                    // Lightweight extraction (not a full JSON parse) just to
+                    // log which fix this is - lines up against gps.py's
+                    // "[SEQ] Pi sending fix #N" and Unity's "[SEQ] Unity
+                    // processed fix #N" to isolate exactly which hop a given
+                    // fix's delay happens on.
+                    var seqMatch = Regex.Match(line, "\"seq\":(\\d+)");
+                    if (seqMatch.Success)
+                        Console.WriteLine($"[{now:HH:mm:ss.fff}] [SEQ] Server received fix #{seqMatch.Groups[1].Value}");
                 }
                 BroadcastToUnity(line, unityClients, unityClientsLock);
             }
