@@ -553,7 +553,19 @@ class NtripClient(object):
                                         7: "Manual input",
                                         8: "Simulation"
                                     }.get(fix_quality, "Unknown")
-                                    print(f"Parsed Location: Latitude={lat}, Longitude={lon}, Fix Status={fix_status}")
+                                    self.fix_seq += 1
+                                    seq = self.fix_seq
+                                    # seq and the fix are printed in the SAME
+                                    # statement, on the SAME stream (stdout),
+                                    # right next to the raw NMEA sentence
+                                    # above - unlike a separate stderr write,
+                                    # this can't get reordered relative to it
+                                    # when stdout/stderr are interleaved by
+                                    # the terminal/capture tool, which was
+                                    # making it ambiguous which GNSS timestamp
+                                    # a given seq actually belonged to.
+                                    ts = datetime.datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
+                                    print(f"[{ts}] [SEQ] fix #{seq}: Latitude={lat}, Longitude={lon}, Fix Status={fix_status}")
 
                                     # GPS course is only reliable once the rover has
                                     # moved enough that fix noise isn't the dominant
@@ -572,10 +584,6 @@ class NtripClient(object):
                                         heading = self.heading
 
                                     if self.relay:
-                                        self.fix_seq += 1
-                                        seq = self.fix_seq
-                                        ts = datetime.datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
-                                        sys.stderr.write("[%s] [SEQ] Pi sending fix #%d\n" % (ts, seq))
                                         self.relay.send({
                                             "lat": lat,
                                             "lon": lon,
