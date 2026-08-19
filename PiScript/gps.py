@@ -143,9 +143,16 @@ class ServerRelay:
     def _connect(self):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Timeout stays set for the socket's whole lifetime (not just
+            # connect) - a flaky link (e.g. a mobile hotspot silently
+            # dropping/re-mapping the connection without ever sending a
+            # TCP RST) would otherwise let sendall() below block for
+            # however long the OS's default TCP retransmission timeout is
+            # (commonly 10+ minutes) - and since send() runs synchronously
+            # in the main GPS loop, that stalls all GPS processing too, not
+            # just the relay, defeating the whole point of this class.
             s.settimeout(5)
             s.connect((self.host, self.port))
-            s.settimeout(None)
             self.sock = s
             if self.verbose:
                 sys.stderr.write("Connected to relay server %s:%d\n" % (self.host, self.port))
@@ -161,8 +168,20 @@ class ServerRelay:
                 self._connect()
             if self.sock is None:
                 return
+            start = time.time()
             try:
                 self.sock.sendall(line)
+                elapsed = time.time() - start
+                # Should be near-instant on a healthy link, and now capped at
+                # 5s by _connect()'s timeout - logging anything slower than
+                # that still helps show the connection degrading before it
+                # actually times out and gets dropped/reconnected.
+                if elapsed > 0.2:
+                    # Same HH:MM:SS.mmm (UTC) format as the server's "Received
+                    # from Pi" lines, so the two logs can be lined up exactly
+                    # instead of guessing from the nearest timestamped line.
+                    ts = datetime.datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
+                    sys.stderr.write("[%s] [PERF] Relay send took %.2fs (type=%s)\n" % (ts, elapsed, obj.get("type", "gps")))
             except OSError as e:
                 if self.verbose:
                     sys.stderr.write("Relay send failed (%s); will reconnect next time\n" % e)
@@ -252,6 +271,7 @@ class NtripClient(object):
         self.heading = 0.0
         self.heading_lock = threading.Lock()
         self.last_position = None
+        self.last_gga_raw = None
         try:
             bus = SMBus(1)
             bus.write_byte_data(MPU6050_ADDR, MPU6050_PWR_MGMT_1, 0)
@@ -516,6 +536,7 @@ class NtripClient(object):
 
                             (raw_data, parsed_data) = self.nmr.read()
                             if bytes("GNGGA", 'ascii') in raw_data:
+                                self.last_gga_raw = raw_data
                                 print(raw_data)
                                 location = self.parse_gngga_sentence(raw_data.decode('ascii'))
                                 if location:
@@ -567,9 +588,18 @@ class NtripClient(object):
                                 self.UDP_socket.sendto(data, ('<broadcast>', self.UDP_Port))
 
                             # Periodically resend GGA so the VRS caster keeps
-                            # generating corrections for your current position
+                            # generating corrections for your current position.
+                            # Reuses the most recently parsed sentence (cached
+                            # above) instead of calling getGGABytes() here -
+                            # that method does its own self.nmr.read() loop,
+                            # which would silently steal one GNGGA sentence
+                            # straight out of the stream this loop is also
+                            # reading from, dropping a real fix every time a
+                            # resend happens to land (this was happening every
+                            # ~gga_resend_interval seconds, every single fix).
                             if time.time() - lastGGAsend >= self.gga_resend_interval:
-                                self.socket.sendall(self.getGGABytes())
+                                gga_to_resend = self.last_gga_raw if self.last_gga_raw is not None else self.getGGABytes()
+                                self.socket.sendall(gga_to_resend)
                                 lastGGAsend = time.time()
                                 if self.verbose:
                                     sys.stderr.write("Resent GGA to caster\n")

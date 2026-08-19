@@ -20,7 +20,8 @@
       "Read(//c/Users/bader/OneDrive/Desktop/footage/SFX/TickTok SFX//**)",
       "Bash(wc -l \"C:/Users/bader/AppData/LocalLow/DefaultCompany/domain_expansion/Sessions/scene_20260816_195606.jsonl\")",
       "Read(//c/Users/bader/AppData/Roaming/Code/User/**)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

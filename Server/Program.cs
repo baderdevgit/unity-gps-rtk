@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -63,9 +64,23 @@ static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients,
         try
         {
             string? line;
+            DateTime? lastLineAt = null;
             while ((line = await reader.ReadLineAsync()) != null)
             {
-                Console.WriteLine($"Received from Pi: {line}");
+                var now = DateTime.UtcNow;
+                // GPS fixes arrive ~1Hz, IMU messages ~10Hz - a gap much bigger
+                // than that (from either) means something upstream (Pi relay,
+                // this listener, or a stalled broadcast to Unity - see
+                // BroadcastToUnity below) is stalling, not just normal spacing.
+                if (lastLineAt.HasValue)
+                {
+                    double gapMs = (now - lastLineAt.Value).TotalMilliseconds;
+                    if (gapMs > 1500)
+                        Console.WriteLine($"[{now:HH:mm:ss.fff}] [PERF] {gapMs:F0}ms gap since previous Pi message");
+                }
+                lastLineAt = now;
+
+                Console.WriteLine($"[{now:HH:mm:ss.fff}] Received from Pi: {line}");
                 // Control/IMU messages (e.g. {"type":"imu",...} at ~10Hz) share
                 // this same relay connection but aren't real GPS fixes - only
                 // cache/log the real ones, or the mobile page's readout would
@@ -97,12 +112,23 @@ static void BroadcastToUnity(string message, List<TcpClient> unityClients, objec
         for (int i = unityClients.Count - 1; i >= 0; i--)
         {
             var uc = unityClients[i];
+            // These sockets have no send timeout configured, so a stalled
+            // Unity client (GC pause, editor hiccup, half-dead connection)
+            // could otherwise block this Write() indefinitely - and since
+            // this runs under unityClientsLock, that would stall every other
+            // message too (GPS fixes AND the 10Hz IMU stream). Timing every
+            // write here tells us whether that's actually happening.
+            var sw = Stopwatch.StartNew();
             try
             {
                 uc.GetStream().Write(data, 0, data.Length);
+                sw.Stop();
+                if (sw.ElapsedMilliseconds > 50)
+                    Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] [PERF] Slow write to Unity client {uc.Client.RemoteEndPoint} took {sw.ElapsedMilliseconds}ms");
             }
-            catch
+            catch (Exception e)
             {
+                Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] [PERF] Unity client {uc.Client.RemoteEndPoint} write failed after {sw.ElapsedMilliseconds}ms ({e.Message}) - removing. {unityClients.Count - 1} client(s) left.");
                 unityClients.RemoveAt(i);
             }
         }
