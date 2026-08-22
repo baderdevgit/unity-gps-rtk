@@ -82,6 +82,16 @@ static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients,
                 lastLineAt = now;
 
                 Console.WriteLine($"[{now:HH:mm:ss.fff}] Received from Pi: {line}");
+
+                // Both real fixes and {"type":"imu",...} messages carry a
+                // "heading" field - log it plainly so a stuck/wrong value
+                // from the new BNO08x (character not turning) is visible
+                // directly here, without having to pick it out of the raw
+                // JSON dump above by eye.
+                var headingMatch = Regex.Match(line, "\"heading\":\\s*(-?[0-9.]+)");
+                if (headingMatch.Success)
+                    Console.WriteLine($"[{now:HH:mm:ss.fff}] [HEADING] {headingMatch.Groups[1].Value}");
+
                 // Control/IMU messages (e.g. {"type":"imu",...} at ~10Hz) share
                 // this same relay connection but aren't real GPS fixes - only
                 // cache/log the real ones, or the mobile page's readout would
@@ -98,7 +108,7 @@ static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients,
                     // "[SEQ] Pi sending fix #N" and Unity's "[SEQ] Unity
                     // processed fix #N" to isolate exactly which hop a given
                     // fix's delay happens on.
-                    var seqMatch = Regex.Match(line, "\"seq\":(\\d+)");
+                    var seqMatch = Regex.Match(line, "\"seq\":\\s*(\\d+)");
                     if (seqMatch.Success)
                         Console.WriteLine($"[{now:HH:mm:ss.fff}] [SEQ] Server received fix #{seqMatch.Groups[1].Value}");
                 }

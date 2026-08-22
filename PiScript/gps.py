@@ -26,12 +26,14 @@ MODIFIED:
     C# relay (which forwards it on to Unity), over its own persistent,
     self-reconnecting TCP connection so a relay outage never blocks GPS
     processing.
-  - Reads a GY-521 (MPU-6050) IMU over I2C to add a heading estimate,
-    relayed separately at ~10Hz (independent of the ~1Hz GPS fix rate) so
-    Unity can rotate smoothly. Re-anchored to the GPS-derived course
-    whenever the rover has moved far enough for that to be reliable, so
-    gyro drift never accumulates for more than one fix interval. Heading
-    only - no IMU-based position estimation, which proved too unreliable.
+  - Reads a BNO08x IMU (accel+gyro+magnetometer, fused on-chip into an
+    absolute orientation) over I2C for heading, relayed separately at ~10Hz
+    (independent of the ~1Hz GPS fix rate) so Unity can rotate smoothly.
+    Deliberately kept fully independent of GPS - no dead reckoning, and no
+    GPS-bearing correction either, unlike the previous GY-521 (MPU-6050)
+    setup: since the BNO08x's fusion is already absolute and drift-free
+    (it has a magnetometer, the old gyro-only sensor didn't), there's
+    nothing left for GPS to correct.
 """
 
 import math
@@ -46,7 +48,10 @@ from optparse import OptionParser
 
 import serial
 from pynmeagps import NMEAReader
-from smbus2 import SMBus
+import board
+import busio
+from adafruit_bno08x.i2c import BNO08X_I2C
+from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR, BNO_REPORT_LINEAR_ACCELERATION
 
 version = 0.3
 useragent = "NTRIP JCMBsoftPythonClient/%.1f" % version
@@ -73,56 +78,33 @@ def build_pqtm_command(payload):
     return ("$%s*%s\r\n" % (payload, nmea_checksum(payload))).encode('ascii')
 
 
-# --- GY-521 (MPU-6050) IMU, over I2C - heading only, no position estimate --
+# --- BNO08x IMU, over I2C - fused absolute heading, no position estimate --
+# Fully independent of GPS by design (no dead reckoning): this module reads
+# an already-fused orientation straight from the sensor, and readData()
+# never touches it or feeds anything back into it.
 
-MPU6050_ADDR = 0x68
-MPU6050_PWR_MGMT_1 = 0x6B
-MPU6050_GYRO_ZOUT_H = 0x47
+def quaternion_to_heading(i, j, k, real):
+    """Converts the BNO08x's rotation-vector quaternion (i,j,k,real =
+    x,y,z,w) to a compass heading in degrees (0=North, 90=East), matching
+    the convention used everywhere else in this project (compute_bearing
+    used to produce, GpsPositioner.cs/Grid3D.cs assume).
 
+    Assumes the sensor's ROTATION_VECTOR follows the standard Android/CEVA
+    sensor-hub convention: world frame X=East, Y=North, Z=Up. Standard yaw
+    extraction gives the angle from world +X (East), increasing counter-
+    clockwise; converting that to compass bearing (0=North, clockwise-
+    positive) is bearing = 90 - yaw.
 
-def _read_word(bus, addr, reg):
-    high = bus.read_byte_data(addr, reg)
-    low = bus.read_byte_data(addr, reg + 1)
-    value = (high << 8) | low
-    if value >= 0x8000:
-        value -= 0x10000
-    return value
-
-
-def read_gyro_z(bus):
-    """Yaw rate in degrees/second."""
-    return _read_word(bus, MPU6050_ADDR, MPU6050_GYRO_ZOUT_H) / 131.0
-
-
-def calibrate_gyro_z(bus, samples=200):
-    """Every MEMS gyro has a small per-axis manufacturing bias - averaging
-    readings while stationary lets us cancel it out in software."""
-    total = 0.0
-    for _ in range(samples):
-        total += read_gyro_z(bus)
-        time.sleep(0.005)
-    return total / samples
-
-
-def meters_distance(lat1, lon1, lat2, lon2):
-    """Flat-earth approximation - matches GpsPositioner.cs on the Unity side,
-    accurate enough for the short distances between consecutive fixes."""
-    meters_per_deg_lat = 111320.0
-    meters_per_deg_lon = 111320.0 * math.cos(math.radians(lat1))
-    dy = (lat2 - lat1) * meters_per_deg_lat
-    dx = (lon2 - lon1) * meters_per_deg_lon
-    return math.hypot(dx, dy)
-
-
-def compute_bearing(lat1, lon1, lat2, lon2):
-    """Initial compass bearing (degrees, 0=North, 90=East) from point 1 to
-    point 2."""
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dlambda = math.radians(lon2 - lon1)
-    x = math.sin(dlambda) * math.cos(phi2)
-    y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
-    return (math.degrees(math.atan2(x, y)) + 360) % 360
+    NOT verified against the physical sensor yet - same class of issue as
+    the old gyro's mirrored mounting. Test empirically once mounted: point
+    it at true north, confirm ~0 degrees comes out; turn to face east,
+    confirm ~90. If it's flipped, negate yaw_deg below before the 90 - x.
+    If there's a constant offset, that's mounting misalignment - subtract
+    it here once measured.
+    """
+    yaw_rad = math.atan2(2.0 * (real * k + i * j), 1.0 - 2.0 * (j * j + k * k))
+    yaw_deg = math.degrees(yaw_rad)
+    return (90.0 - yaw_deg) % 360.0
 
 
 class ServerRelay:
@@ -266,24 +248,25 @@ class NtripClient(object):
         else:
             self.relay = None
 
-        self.imu_bus = None
-        self.gyro_bias = 0.0
+        self.imu = None
         self.heading = 0.0
         self.heading_lock = threading.Lock()
-        self.last_position = None
         self.last_gga_raw = None
         self.fix_seq = 0
         try:
-            bus = SMBus(1)
-            bus.write_byte_data(MPU6050_ADDR, MPU6050_PWR_MGMT_1, 0)
-            time.sleep(0.1)
-            sys.stderr.write("Calibrating IMU gyro bias (keep it still)...\n")
-            self.gyro_bias = calibrate_gyro_z(bus)
-            self.imu_bus = bus
-            sys.stderr.write("IMU ready. Gyro bias: %.2f deg/s\n" % self.gyro_bias)
+            i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+            self.imu = BNO08X_I2C(i2c)
+            self.imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+            # Also enabled (even though linear acceleration itself is unused
+            # here) to match the verified-working test script exactly - only
+            # reading one of two enabled report types seemed to leave the
+            # driver serving stale/cached quaternion data instead of fresh
+            # reports (frozen heading, bit-identical for 18+ seconds).
+            self.imu.enable_feature(BNO_REPORT_LINEAR_ACCELERATION)
+            sys.stderr.write("IMU (BNO08x) ready.\n")
             threading.Thread(target=self.runImuLoop, daemon=True).start()
-        except OSError as e:
-            sys.stderr.write("IMU (GY-521) not available (%s) - heading will be omitted.\n" % e)
+        except Exception as e:
+            sys.stderr.write("IMU (BNO08x) not available (%s) - heading will be omitted.\n" % e)
 
         if UDP_Port:
             self.UDP_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -398,24 +381,32 @@ class NtripClient(object):
     def runImuLoop(self, rate_hz=10):
         """Runs on its own thread so heading updates at ~rate_hz regardless
         of how slowly GPS fixes arrive (~1Hz). Sends a lightweight
-        {"type":"imu"} message per tick - readData() still periodically
-        re-anchors self.heading to the GPS-derived course, so this loop
-        never needs to know about position itself. Heading only - no
-        position/speed estimation from the IMU."""
+        {"type":"imu"} message per tick. Fully independent of GPS/position -
+        the BNO08x's on-chip fusion is already an absolute, drift-free
+        heading, so unlike the old gyro-only setup there's nothing here for
+        GPS to correct."""
         interval = 1.0 / rate_hz
-        last_time = time.time()
         while True:
             time.sleep(interval)
             now = time.time()
-            dt = now - last_time
-            last_time = now
 
-            # Negated: the board is mounted upside-down, so its Z-axis points
-            # down instead of up, flipping the sign of the raw yaw rate.
-            gyro_z = -(read_gyro_z(self.imu_bus) - self.gyro_bias)
+            try:
+                i, j, k, real = self.imu.quaternion
+                # Unused, but read every tick anyway to match the verified-
+                # working test script exactly - only reading one of the two
+                # enabled report types left the driver serving stale/cached
+                # quaternion data instead of fresh reports.
+                _ = self.imu.linear_acceleration
+            except Exception as e:
+                # Known adafruit_bno08x bug: occasionally chokes on an
+                # unrecognized report (0x7b). Safe to skip and retry next tick
+                # rather than crash the whole IMU thread over one bad packet.
+                sys.stderr.write("IMU read skipped (%s)\n" % e)
+                continue
+
+            heading = quaternion_to_heading(i, j, k, real)
             with self.heading_lock:
-                self.heading = (self.heading + gyro_z * dt) % 360
-                heading = self.heading
+                self.heading = heading
 
             if self.relay:
                 self.relay.send({"type": "imu", "heading": heading, "timestamp": now})
@@ -567,19 +558,12 @@ class NtripClient(object):
                                     ts = datetime.datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
                                     print(f"[{ts}] [SEQ] fix #{seq}: Latitude={lat}, Longitude={lon}, Fix Status={fix_status}")
 
-                                    # GPS course is only reliable once the rover has
-                                    # moved enough that fix noise isn't the dominant
-                                    # signal - re-anchor heading here so the fast IMU
-                                    # thread's gyro integration never drifts for more
-                                    # than one fix interval.
-                                    if self.last_position is not None:
-                                        dist = meters_distance(self.last_position[0], self.last_position[1], lat, lon)
-                                        if dist > 0.5:
-                                            with self.heading_lock:
-                                                self.heading = compute_bearing(
-                                                    self.last_position[0], self.last_position[1], lat, lon)
-                                    self.last_position = (lat, lon)
-
+                                    # Just reads whatever the IMU thread's most
+                                    # recent fused heading is, to tag along
+                                    # with the fix - no GPS-derived correction
+                                    # feeds back into it (orientation and GPS
+                                    # are deliberately independent; no dead
+                                    # reckoning here).
                                     with self.heading_lock:
                                         heading = self.heading
 
