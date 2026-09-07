@@ -145,6 +145,20 @@ def quaternion_multiply(q1, q2):
 # what came out (73.7 degrees) - subtracting that here makes north read 0.
 HEADING_OFFSET_DEG = -73.7
 
+# Max plausible heading change in one ~100ms tick before it's treated as
+# suspected sensor corruption rather than real rotation. The known BNO08x/
+# adafruit_bno08x bug doesn't always produce an out-of-range quaternion
+# magnitude - a garbled packet can decode into another perfectly valid unit
+# quaternion that just happens to represent the wrong orientation (often a
+# clean ~90 degree jump), which the magnitude check alone can't catch.
+MAX_HEADING_JUMP_DEG = 45.0
+
+
+def _heading_delta_deg(a, b):
+    """Smallest signed angular distance from b to a, in degrees, accounting
+    for 0/360 wraparound."""
+    return (a - b + 180.0) % 360.0 - 180.0
+
 
 def _cross(a, b):
     return (
@@ -436,6 +450,8 @@ class NtripClient(object):
         last_reading = None
         stale_count = 0
         consecutive_exceptions = 0
+        last_accepted_heading = None
+        jump_streak = 0
 
         while True:
             time.sleep(interval)
@@ -468,6 +484,8 @@ class NtripClient(object):
                     consecutive_exceptions = 0
                     last_reading = None
                     stale_count = 0
+                    last_accepted_heading = None
+                    jump_streak = 0
                 continue
             consecutive_exceptions = 0
 
@@ -499,6 +517,8 @@ class NtripClient(object):
                         sys.stderr.write("IMU reconnect failed (%s), will retry.\n" % e)
                     stale_count = 0
                     last_reading = None
+                    last_accepted_heading = None
+                    jump_streak = 0
                 continue
             stale_count = 0
 
@@ -507,6 +527,22 @@ class NtripClient(object):
             )
             heading = quaternion_to_heading(corrected_i, corrected_j, corrected_k, corrected_real)
             heading = (heading + HEADING_OFFSET_DEG) % 360.0
+
+            # Reject implausibly large single-tick jumps (a real turn can't
+            # cover 45+ degrees in ~100ms) unless they repeat on the very
+            # next tick too - a real fast turn keeps agreeing, a corrupted
+            # one-off packet doesn't. Prevents the "randomly rezeros 90
+            # degrees" symptom from one garbled report.
+            if last_accepted_heading is not None:
+                jump = abs(_heading_delta_deg(heading, last_accepted_heading))
+                if jump > MAX_HEADING_JUMP_DEG:
+                    jump_streak += 1
+                    if jump_streak < 2:
+                        continue
+                else:
+                    jump_streak = 0
+            last_accepted_heading = heading
+
             with self.heading_lock:
                 self.heading = heading
 
