@@ -435,6 +435,7 @@ class NtripClient(object):
         interval = 1.0 / rate_hz
         last_reading = None
         stale_count = 0
+        consecutive_exceptions = 0
 
         while True:
             time.sleep(interval)
@@ -450,11 +451,25 @@ class NtripClient(object):
                 # 1Hz fixes, instead of being discarded.
                 accel_body = self.imu.linear_acceleration
             except Exception as e:
-                # Known adafruit_bno08x bug: occasionally chokes on an
-                # unrecognized report (0x7b). Safe to skip and retry next tick
-                # rather than crash the whole IMU thread over one bad packet.
-                sys.stderr.write("IMU read skipped (%s)\n" % e)
+                # Known adafruit_bno08x bug: occasionally chokes on one bad
+                # packet (safe to just skip+retry), but can also wedge the
+                # driver into throwing on EVERY subsequent read forever - a
+                # plain retry never recovers from that case, so reconnect
+                # after a few misses in a row rather than looping here forever.
+                consecutive_exceptions += 1
+                sys.stderr.write("IMU read skipped (%s) - failure #%d\n" % (e, consecutive_exceptions))
+                if consecutive_exceptions >= 5:
+                    sys.stderr.write("IMU failing repeatedly - reconnecting.\n")
+                    try:
+                        self.imu = self._connect_imu()
+                        sys.stderr.write("IMU reconnected.\n")
+                    except Exception as reconnect_error:
+                        sys.stderr.write("IMU reconnect failed (%s), will retry.\n" % reconnect_error)
+                    consecutive_exceptions = 0
+                    last_reading = None
+                    stale_count = 0
                 continue
+            consecutive_exceptions = 0
 
             magnitude = math.sqrt(i * i + j * j + k * k + real * real)
             reading = (i, j, k, real, accel_body[0], accel_body[1], accel_body[2])
