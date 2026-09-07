@@ -107,80 +107,103 @@ def quaternion_to_heading(i, j, k, real):
     return (90.0 - yaw_deg) % 360.0
 
 
+# Fixed mounting-correction quaternion, calibrated empirically: captured
+# raw (i,j,k,real) from the sensor while the rig sat in a known reference
+# pose (pointed at a known heading, sitting level). The mount isn't just
+# yaw-offset - it's also rolled onto its side - so a flat number added to
+# heading isn't enough; this instead redefines "zero" to be exactly that
+# reference orientation, regardless of how the chip's own axes are tilted
+# relative to the vehicle. Only used for heading - rotate_body_accel_to_world
+# below already works correctly regardless of mounting, since it's a true
+# 3D rotation of the sensor's actual physical orientation.
+_MOUNT_REFERENCE_QUATERNION = (0.722, 0.030, 0.038, 0.690)  # (i, j, k, real) captured at reference pose
+MOUNT_CORRECTION_QUATERNION = (
+    -_MOUNT_REFERENCE_QUATERNION[0],
+    -_MOUNT_REFERENCE_QUATERNION[1],
+    -_MOUNT_REFERENCE_QUATERNION[2],
+    _MOUNT_REFERENCE_QUATERNION[3],
+)  # conjugate = inverse, since the reference quaternion is unit-length
+
+
+def quaternion_multiply(q1, q2):
+    """Hamilton product of two (i,j,k,real) quaternions - applying the
+    combined result to a vector is equivalent to rotating by q2 first, then
+    by q1."""
+    i1, j1, k1, w1 = q1
+    i2, j2, k2, w2 = q2
+    w = w1 * w2 - i1 * i2 - j1 * j2 - k1 * k2
+    i = w1 * i2 + i1 * w2 + j1 * k2 - k1 * j2
+    j = w1 * j2 - i1 * k2 + j1 * w2 + k1 * i2
+    k = w1 * k2 + i1 * j2 - j1 * i2 + k1 * w2
+    return (i, j, k, w)
+
+
+# quaternion_to_heading() has a built-in +90 baseline (it reports the compass
+# bearing of the body's own X-axis, not Y) which shows up even after the
+# mount correction above cancels the raw quaternion back to identity at the
+# reference pose. Calibrated by pointing the rig at true north and reading
+# what came out (73.7 degrees) - subtracting that here makes north read 0.
+HEADING_OFFSET_DEG = -73.7
+
+
+def _cross(a, b):
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def rotate_body_accel_to_world(accel_xyz, i, j, k, real):
+    """Rotates the BNO08x's linear_acceleration (body-frame, gravity
+    already subtracted by the sensor) into world ENU frame using the same
+    rotation-vector quaternion quaternion_to_heading() uses for compass
+    heading - standard optimized quaternion-vector rotation formula.
+    Returns (east, north, up) in m/s^2; only east/north are used for flat
+    2D movement, up is discarded upstream."""
+    qv = (i, j, k)
+    t = tuple(2.0 * c for c in _cross(qv, accel_xyz))
+    cross_qv_t = _cross(qv, t)
+    return (
+        accel_xyz[0] + real * t[0] + cross_qv_t[0],
+        accel_xyz[1] + real * t[1] + cross_qv_t[1],
+        accel_xyz[2] + real * t[2] + cross_qv_t[2],
+    )
+
+
 class ServerRelay:
-    """Persistent TCP connection to the Domain-Expansion-Server relay
-    (the C# server's Raspberry Pi-facing listener), which forwards each
-    line on to Unity. Reconnects lazily on send failure; a message is
-    dropped rather than blocking GPS processing if the relay is
-    unreachable."""
+    """UDP relay to the Domain-Expansion-Server (the C# server's Raspberry
+    Pi-facing listener), which forwards each message on to Unity. UDP's
+    connect() just records the destination locally - no handshake, so
+    there's no "connection" to go stale the way the old TCP one could on a
+    flaky mobile hotspot. A message is simply dropped (never blocks GPS
+    processing) if a send happens to fail."""
 
     def __init__(self, host, port, verbose=False):
         self.host = host
         self.port = port
         self.verbose = verbose
-        self.sock = None
         self.lock = threading.Lock()
-        self._connect()
-
-    def _connect(self):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # Timeout stays set for the socket's whole lifetime (not just
-            # connect) - a flaky link (e.g. a mobile hotspot silently
-            # dropping/re-mapping the connection without ever sending a
-            # TCP RST) would otherwise let sendall() below block for
-            # however long the OS's default TCP retransmission timeout is
-            # (commonly 10+ minutes) - and since send() runs synchronously
-            # in the main GPS loop, that stalls all GPS processing too, not
-            # just the relay, defeating the whole point of this class.
-            s.settimeout(5)
-            s.connect((self.host, self.port))
-            self.sock = s
-            if self.verbose:
-                sys.stderr.write("Connected to relay server %s:%d\n" % (self.host, self.port))
-        except OSError as e:
-            if self.verbose:
-                sys.stderr.write("Relay server connect failed: %s\n" % e)
-            self.sock = None
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.connect((self.host, self.port))
+        if self.verbose:
+            sys.stderr.write("Relaying to %s:%d over UDP\n" % (self.host, self.port))
 
     def send(self, obj):
         line = (json.dumps(obj) + "\n").encode("utf-8")
         with self.lock:
-            if self.sock is None:
-                self._connect()
-            if self.sock is None:
-                return
-            start = time.time()
             try:
-                self.sock.sendall(line)
-                elapsed = time.time() - start
-                # Should be near-instant on a healthy link, and now capped at
-                # 5s by _connect()'s timeout - logging anything slower than
-                # that still helps show the connection degrading before it
-                # actually times out and gets dropped/reconnected.
-                if elapsed > 0.2:
-                    # Same HH:MM:SS.mmm (UTC) format as the server's "Received
-                    # from Pi" lines, so the two logs can be lined up exactly
-                    # instead of guessing from the nearest timestamped line.
-                    ts = datetime.datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
-                    sys.stderr.write("[%s] [PERF] Relay send took %.2fs (type=%s)\n" % (ts, elapsed, obj.get("type", "gps")))
+                self.sock.send(line)
             except OSError as e:
                 if self.verbose:
-                    sys.stderr.write("Relay send failed (%s); will reconnect next time\n" % e)
-                try:
-                    self.sock.close()
-                except OSError:
-                    pass
-                self.sock = None
+                    sys.stderr.write("Relay send failed (%s); dropping this message\n" % e)
 
     def close(self):
         with self.lock:
-            if self.sock:
-                try:
-                    self.sock.close()
-                except OSError:
-                    pass
-                self.sock = None
+            try:
+                self.sock.close()
+            except OSError:
+                pass
 
 
 class NtripClient(object):
@@ -253,16 +276,9 @@ class NtripClient(object):
         self.heading_lock = threading.Lock()
         self.last_gga_raw = None
         self.fix_seq = 0
+        self.last_satellite_count = 0
         try:
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
-            self.imu = BNO08X_I2C(i2c)
-            self.imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
-            # Also enabled (even though linear acceleration itself is unused
-            # here) to match the verified-working test script exactly - only
-            # reading one of two enabled report types seemed to leave the
-            # driver serving stale/cached quaternion data instead of fresh
-            # reports (frozen heading, bit-identical for 18+ seconds).
-            self.imu.enable_feature(BNO_REPORT_LINEAR_ACCELERATION)
+            self.imu = self._connect_imu()
             sys.stderr.write("IMU (BNO08x) ready.\n")
             threading.Thread(target=self.runImuLoop, daemon=True).start()
         except Exception as e:
@@ -378,6 +394,37 @@ class NtripClient(object):
         self.lonMin = (lon - self.lonDeg) * 60
         self.latMin = (lat - self.latDeg) * 60
 
+    def _connect_imu(self):
+        """(Re)acquires the I2C bus and BNO08x driver from scratch. Used both
+        at startup and to recover from the known adafruit_bno08x bug where
+        I2C clock-stretching corrupts the driver's internal state - a plain
+        retry isn't enough in that case, it needs a full reconnect.
+
+        Crucially releases the PREVIOUS bus with i2c.deinit() before
+        acquiring a new one - skipping this leaves the I2C peripheral locked,
+        so every reconnect attempt after the first one silently fails to
+        re-acquire it (this exact bug already bit an earlier standalone test
+        script - the fix there was the same: deinit before reconnecting)."""
+        old_i2c = getattr(self, "_i2c", None)
+        if old_i2c is not None:
+            try:
+                old_i2c.deinit()
+            except Exception:
+                pass
+
+        self._i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+        # ADO reads high on this board despite being wired to GND, so it
+        # answers on the secondary address (0x4B) instead of the default 0x4A.
+        imu = BNO08X_I2C(self._i2c, address=0x4B)
+        imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+        # Also enabled (even though linear acceleration itself is unused
+        # here) to match the verified-working test script exactly - only
+        # reading one of two enabled report types seemed to leave the
+        # driver serving stale/cached quaternion data instead of fresh
+        # reports (frozen heading, bit-identical for 18+ seconds).
+        imu.enable_feature(BNO_REPORT_LINEAR_ACCELERATION)
+        return imu
+
     def runImuLoop(self, rate_hz=10):
         """Runs on its own thread so heading updates at ~rate_hz regardless
         of how slowly GPS fixes arrive (~1Hz). Sends a lightweight
@@ -386,17 +433,22 @@ class NtripClient(object):
         heading, so unlike the old gyro-only setup there's nothing here for
         GPS to correct."""
         interval = 1.0 / rate_hz
+        last_reading = None
+        stale_count = 0
+
         while True:
             time.sleep(interval)
             now = time.time()
 
             try:
                 i, j, k, real = self.imu.quaternion
-                # Unused, but read every tick anyway to match the verified-
-                # working test script exactly - only reading one of the two
-                # enabled report types left the driver serving stale/cached
-                # quaternion data instead of fresh reports.
-                _ = self.imu.linear_acceleration
+                # Also read every tick to keep both enabled report types
+                # serviced (matches the verified-working test script -
+                # reading only one left the driver serving stale/cached
+                # quaternion data). Now actually used: rotated into world
+                # frame below for Unity's IMU-assisted movement between
+                # 1Hz fixes, instead of being discarded.
+                accel_body = self.imu.linear_acceleration
             except Exception as e:
                 # Known adafruit_bno08x bug: occasionally chokes on an
                 # unrecognized report (0x7b). Safe to skip and retry next tick
@@ -404,12 +456,60 @@ class NtripClient(object):
                 sys.stderr.write("IMU read skipped (%s)\n" % e)
                 continue
 
-            heading = quaternion_to_heading(i, j, k, real)
+            magnitude = math.sqrt(i * i + j * j + k * k + real * real)
+            reading = (i, j, k, real, accel_body[0], accel_body[1], accel_body[2])
+
+            # The known library bug doesn't always raise an exception - it can
+            # silently keep serving the exact same cached report forever, or
+            # (separately) corrupt the quaternion so its magnitude drifts from
+            # 1.0. Neither is a real physical reading, so treat several ticks
+            # of either as a sign the driver desynced and needs a full
+            # reconnect (a plain retry doesn't recover from this - confirmed
+            # in earlier standalone testing).
+            corrupt = abs(magnitude - 1.0) > 0.05
+            frozen = reading == last_reading
+            last_reading = reading
+
+            if corrupt or frozen:
+                stale_count += 1
+                if stale_count >= 30:  # ~3s at 10Hz
+                    sys.stderr.write(
+                        "IMU %s for %d ticks - reconnecting.\n"
+                        % ("corrupt" if corrupt else "frozen", stale_count)
+                    )
+                    try:
+                        self.imu = self._connect_imu()
+                        sys.stderr.write("IMU reconnected.\n")
+                    except Exception as e:
+                        sys.stderr.write("IMU reconnect failed (%s), will retry.\n" % e)
+                    stale_count = 0
+                    last_reading = None
+                continue
+            stale_count = 0
+
+            corrected_i, corrected_j, corrected_k, corrected_real = quaternion_multiply(
+                (i, j, k, real), MOUNT_CORRECTION_QUATERNION
+            )
+            heading = quaternion_to_heading(corrected_i, corrected_j, corrected_k, corrected_real)
+            heading = (heading + HEADING_OFFSET_DEG) % 360.0
             with self.heading_lock:
                 self.heading = heading
 
+            # Uses the RAW (uncorrected) quaternion - this is the sensor's
+            # true physical orientation, which is what's needed to rotate its
+            # own raw accelerometer reading into real world ENU. The mount
+            # correction above only matters for interpreting heading relative
+            # to the vehicle's forward direction, not for this.
+            accel_east, accel_north, _accel_up = rotate_body_accel_to_world(accel_body, i, j, k, real)
+
             if self.relay:
-                self.relay.send({"type": "imu", "heading": heading, "timestamp": now})
+                self.relay.send({
+                    "type": "imu",
+                    "heading": heading,
+                    "accelEast": accel_east,
+                    "accelNorth": accel_north,
+                    "timestamp": now,
+                })
 
     def getMountPointBytes(self):
         mountPointString = "GET %s HTTP/1.1\r\nUser-Agent: %s\r\nAuthorization: Basic %s\r\n" % (
@@ -530,7 +630,18 @@ class NtripClient(object):
                             if bytes("GNGGA", 'ascii') in raw_data:
                                 self.last_gga_raw = raw_data
                                 print(raw_data)
-                                location = self.parse_gngga_sentence(raw_data.decode('ascii'))
+                                sentence = raw_data.decode('ascii')
+                                # Satellite count (field 7) is present even
+                                # with no fix yet (e.g. "00") - tracked
+                                # separately from parse_gngga_sentence below,
+                                # which bails out entirely when lat/lon are
+                                # empty, so this still updates during the
+                                # "0 satellites, no fix" stretch that's
+                                # actually the interesting one to see.
+                                gga_fields = sentence.split(',')
+                                if len(gga_fields) > 7 and gga_fields[7].isdigit():
+                                    self.last_satellite_count = int(gga_fields[7])
+                                location = self.parse_gngga_sentence(sentence)
                                 if location:
                                     lat, lon, alt, fix_quality = location
                                     fix_status = {
@@ -623,8 +734,8 @@ class NtripClient(object):
                     self.socket = None
 
                     if reconnectTry < maxReconnect:
-                        sys.stderr.write("%s No Connection to NtripCaster.  Trying again in %i seconds\n" % (
-                            datetime.datetime.now(), sleepTime))
+                        sys.stderr.write("%s Satellites visible: %d - no correction data yet, retrying in %i seconds\n" % (
+                            datetime.datetime.now(), self.last_satellite_count, sleepTime))
                         time.sleep(sleepTime)
                         sleepTime = factor
                         if sleepTime > maxReconnectTime:
@@ -639,8 +750,8 @@ class NtripClient(object):
                         print("Error indicator: ", error_indicator)
 
                     if reconnectTry < maxReconnect:
-                        sys.stderr.write("%s No Connection to NtripCaster.  Trying again in %i seconds\n" % (
-                            datetime.datetime.now(), sleepTime))
+                        sys.stderr.write("%s Satellites visible: %d - no correction data yet, retrying in %i seconds\n" % (
+                            datetime.datetime.now(), self.last_satellite_count, sleepTime))
                         time.sleep(sleepTime)
                         sleepTime = factor
                         if sleepTime > maxReconnectTime:

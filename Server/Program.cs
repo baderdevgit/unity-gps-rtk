@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -33,145 +32,101 @@ Console.WriteLine($"Logging GPS fixes to {gpsLogPath}");
 string loggedPositionsPath = Path.Combine(AppContext.BaseDirectory, "logged_positions.jsonl");
 var loggedPositionsLock = new object();
 
-var unityClients = new List<TcpClient>();
-var unityClientsLock = new object();
 var snapshots = new SnapshotStore();
 var latestFix = new TextStore();
 
-_ = Task.Run(() => RunUnityListener(unityPort, unityClients, unityClientsLock));
-_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityClients, unityClientsLock, snapshots, latestFix, loggedPositionsPath, loggedPositionsLock));
-await RunPiListener(piPort, unityClients, unityClientsLock, latestFix, gpsLogPath, gpsLogLock);
+// Unity runs on this same PC, so the Server->Unity hop is loopback traffic -
+// no "connection" to accept/track at all under UDP, just a fixed
+// destination to send() to. This also deletes the old stuck-write/
+// unityClients bookkeeping class of bug entirely (no longer applicable).
+var unityEndpoint = new IPEndPoint(IPAddress.Loopback, unityPort);
+var unitySendClient = new UdpClient();
 
-static async Task RunPiListener(int port, List<TcpClient> unityClients, object unityClientsLock, TextStore latestFix, string gpsLogPath, object gpsLogLock)
+_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, loggedPositionsPath, loggedPositionsLock));
+await RunPiListener(piPort, unityEndpoint, unitySendClient, latestFix, gpsLogPath, gpsLogLock);
+
+static async Task RunPiListener(int port, IPEndPoint unityEndpoint, UdpClient unitySendClient, TextStore latestFix, string gpsLogPath, object gpsLogLock)
 {
-    var listener = new TcpListener(IPAddress.Any, port);
-    listener.Start();
-    Console.WriteLine($"Listening for Raspberry Pi on port {port}...");
+    var udp = new UdpClient(port);
+    Console.WriteLine($"Listening for Raspberry Pi on UDP port {port}...");
 
+    DateTime? lastLineAt = null;
     while (true)
     {
-        var client = await listener.AcceptTcpClientAsync();
-        Console.WriteLine($"Pi connected from {client.Client.RemoteEndPoint}");
-        _ = Task.Run(() => HandlePiClient(client, unityClients, unityClientsLock, latestFix, gpsLogPath, gpsLogLock));
-    }
-}
-
-static async Task HandlePiClient(TcpClient client, List<TcpClient> unityClients, object unityClientsLock, TextStore latestFix, string gpsLogPath, object gpsLogLock)
-{
-    using (client)
-    using (var stream = client.GetStream())
-    using (var reader = new StreamReader(stream, Encoding.UTF8))
-    {
+        UdpReceiveResult result;
         try
         {
-            string? line;
-            DateTime? lastLineAt = null;
-            while ((line = await reader.ReadLineAsync()) != null)
-            {
-                var now = DateTime.UtcNow;
-                // GPS fixes arrive ~1Hz, IMU messages ~10Hz - a gap much bigger
-                // than that (from either) means something upstream (Pi relay,
-                // this listener, or a stalled broadcast to Unity - see
-                // BroadcastToUnity below) is stalling, not just normal spacing.
-                if (lastLineAt.HasValue)
-                {
-                    double gapMs = (now - lastLineAt.Value).TotalMilliseconds;
-                    if (gapMs > 1500)
-                        Console.WriteLine($"[{now:HH:mm:ss.fff}] [PERF] {gapMs:F0}ms gap since previous Pi message");
-                }
-                lastLineAt = now;
-
-                Console.WriteLine($"[{now:HH:mm:ss.fff}] Received from Pi: {line}");
-
-                // Both real fixes and {"type":"imu",...} messages carry a
-                // "heading" field - log it plainly so a stuck/wrong value
-                // from the new BNO08x (character not turning) is visible
-                // directly here, without having to pick it out of the raw
-                // JSON dump above by eye.
-                var headingMatch = Regex.Match(line, "\"heading\":\\s*(-?[0-9.]+)");
-                if (headingMatch.Success)
-                    Console.WriteLine($"[{now:HH:mm:ss.fff}] [HEADING] {headingMatch.Groups[1].Value}");
-
-                // Control/IMU messages (e.g. {"type":"imu",...} at ~10Hz) share
-                // this same relay connection but aren't real GPS fixes - only
-                // cache/log the real ones, or the mobile page's readout would
-                // mostly be reading stale/incomplete IMU data instead.
-                if (!line.Contains("\"type\":"))
-                {
-                    latestFix.Set(line);
-                    lock (gpsLogLock)
-                    {
-                        File.AppendAllText(gpsLogPath, line + "\n");
-                    }
-                    // Lightweight extraction (not a full JSON parse) just to
-                    // log which fix this is - lines up against gps.py's
-                    // "[SEQ] Pi sending fix #N" and Unity's "[SEQ] Unity
-                    // processed fix #N" to isolate exactly which hop a given
-                    // fix's delay happens on.
-                    var seqMatch = Regex.Match(line, "\"seq\":\\s*(\\d+)");
-                    if (seqMatch.Success)
-                        Console.WriteLine($"[{now:HH:mm:ss.fff}] [SEQ] Server received fix #{seqMatch.Groups[1].Value}");
-                }
-                BroadcastToUnity(line, unityClients, unityClientsLock);
-            }
+            result = await udp.ReceiveAsync();
         }
-        catch (IOException)
+        catch (SocketException e)
         {
-            // Pi dropped the connection abruptly; fall through to cleanup below.
+            // A previous send to an unreachable/closed remote port can
+            // surface here as an ICMP-triggered error on some platforms -
+            // log and keep listening rather than let the whole loop die.
+            Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] Pi listener socket error: {e.Message}");
+            continue;
         }
+
+        string line = Encoding.UTF8.GetString(result.Buffer);
+        var now = DateTime.UtcNow;
+        // GPS fixes arrive ~1Hz, IMU messages ~10Hz - a gap much bigger
+        // than that means something upstream (Pi relay, network) is
+        // stalling, not just normal spacing.
+        if (lastLineAt.HasValue)
+        {
+            double gapMs = (now - lastLineAt.Value).TotalMilliseconds;
+            if (gapMs > 1500)
+                Console.WriteLine($"[{now:HH:mm:ss.fff}] [PERF] {gapMs:F0}ms gap since previous Pi message");
+        }
+        lastLineAt = now;
+
+        Console.WriteLine($"[{now:HH:mm:ss.fff}] Received from Pi: {line}");
+
+        // Both real fixes and {"type":"imu",...} messages carry a
+        // "heading" field - log it plainly so a stuck/wrong value from the
+        // BNO08x is visible directly here, without picking it out of the
+        // raw JSON dump above by eye.
+        var headingMatch = Regex.Match(line, "\"heading\":\\s*(-?[0-9.]+)");
+        if (headingMatch.Success)
+            Console.WriteLine($"[{now:HH:mm:ss.fff}] [HEADING] {headingMatch.Groups[1].Value}");
+
+        // Control/IMU messages (e.g. {"type":"imu",...} at ~10Hz) share this
+        // same relay port but aren't real GPS fixes - only cache/log the
+        // real ones, or the mobile page's readout would mostly be reading
+        // stale/incomplete IMU data instead.
+        if (!line.Contains("\"type\":"))
+        {
+            latestFix.Set(line);
+            lock (gpsLogLock)
+            {
+                File.AppendAllText(gpsLogPath, line + "\n");
+            }
+            // Lightweight extraction (not a full JSON parse) just to log
+            // which fix this is - lines up against gps.py's "[SEQ] Pi
+            // sending fix #N" and Unity's "[SEQ] Unity processed fix #N" to
+            // isolate exactly which hop a given fix's delay happens on.
+            var seqMatch = Regex.Match(line, "\"seq\":\\s*(\\d+)");
+            if (seqMatch.Success)
+                Console.WriteLine($"[{now:HH:mm:ss.fff}] [SEQ] Server received fix #{seqMatch.Groups[1].Value}");
+        }
+        SendToUnity(line, unityEndpoint, unitySendClient);
     }
-    Console.WriteLine("Pi disconnected.");
 }
 
-static void BroadcastToUnity(string message, List<TcpClient> unityClients, object unityClientsLock)
+static void SendToUnity(string message, IPEndPoint unityEndpoint, UdpClient unitySendClient)
 {
-    byte[] data = Encoding.UTF8.GetBytes(message + "\n");
-    lock (unityClientsLock)
+    byte[] data = Encoding.UTF8.GetBytes(message);
+    try
     {
-        for (int i = unityClients.Count - 1; i >= 0; i--)
-        {
-            var uc = unityClients[i];
-            // These sockets have no send timeout configured, so a stalled
-            // Unity client (GC pause, editor hiccup, half-dead connection)
-            // could otherwise block this Write() indefinitely - and since
-            // this runs under unityClientsLock, that would stall every other
-            // message too (GPS fixes AND the 10Hz IMU stream). Timing every
-            // write here tells us whether that's actually happening.
-            var sw = Stopwatch.StartNew();
-            try
-            {
-                uc.GetStream().Write(data, 0, data.Length);
-                sw.Stop();
-                if (sw.ElapsedMilliseconds > 50)
-                    Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] [PERF] Slow write to Unity client {uc.Client.RemoteEndPoint} took {sw.ElapsedMilliseconds}ms");
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] [PERF] Unity client {uc.Client.RemoteEndPoint} write failed after {sw.ElapsedMilliseconds}ms ({e.Message}) - removing. {unityClients.Count - 1} client(s) left.");
-                unityClients.RemoveAt(i);
-            }
-        }
+        unitySendClient.Send(data, data.Length, unityEndpoint);
+    }
+    catch (Exception e)
+    {
+        Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] Send to Unity failed: {e.Message}");
     }
 }
 
-static async Task RunUnityListener(int port, List<TcpClient> unityClients, object unityClientsLock)
-{
-    var listener = new TcpListener(IPAddress.Any, port);
-    listener.Start();
-    Console.WriteLine($"Listening for Unity on port {port}...");
-
-    while (true)
-    {
-        var client = await listener.AcceptTcpClientAsync();
-        Console.WriteLine("Unity connected.");
-        lock (unityClientsLock)
-        {
-            unityClients.Add(client);
-        }
-    }
-}
-
-static async Task RunWebServer(int port, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots, TextStore latestFix, string loggedPositionsPath, object loggedPositionsLock)
+static async Task RunWebServer(int port, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, string loggedPositionsPath, object loggedPositionsLock)
 {
     var listener = new HttpListener();
     listener.Prefixes.Add($"http://+:{port}/");
@@ -191,11 +146,11 @@ static async Task RunWebServer(int port, string token, string indexHtml, List<Tc
     while (true)
     {
         var ctx = await listener.GetContextAsync();
-        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityClients, unityClientsLock, snapshots, latestFix, loggedPositionsPath, loggedPositionsLock));
+        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, loggedPositionsPath, loggedPositionsLock));
     }
 }
 
-static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, List<TcpClient> unityClients, object unityClientsLock, SnapshotStore snapshots, TextStore latestFix, string loggedPositionsPath, object loggedPositionsLock)
+static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, string loggedPositionsPath, object loggedPositionsLock)
 {
     try
     {
@@ -214,7 +169,7 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
                     break;
                 }
-                BroadcastToUnity("{\"type\":\"reset\"}", unityClients, unityClientsLock);
+                SendToUnity("{\"type\":\"reset\"}", unityEndpoint, unitySendClient);
                 Console.WriteLine("Reset requested from web UI.");
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
@@ -225,7 +180,7 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
                     break;
                 }
-                BroadcastToUnity("{\"type\":\"place\"}", unityClients, unityClientsLock);
+                SendToUnity("{\"type\":\"place\"}", unityEndpoint, unitySendClient);
                 Console.WriteLine("Place marker requested from web UI.");
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
@@ -236,7 +191,7 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
                     break;
                 }
-                BroadcastToUnity("{\"type\":\"clear\"}", unityClients, unityClientsLock);
+                SendToUnity("{\"type\":\"clear\"}", unityEndpoint, unitySendClient);
                 Console.WriteLine("Clear markers requested from web UI.");
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
@@ -247,7 +202,7 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
                     break;
                 }
-                BroadcastToUnity("{\"type\":\"start-recording\"}", unityClients, unityClientsLock);
+                SendToUnity("{\"type\":\"start-recording\"}", unityEndpoint, unitySendClient);
                 Console.WriteLine("Start recording requested from web UI.");
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
@@ -258,7 +213,7 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
                     break;
                 }
-                BroadcastToUnity("{\"type\":\"stop-recording\"}", unityClients, unityClientsLock);
+                SendToUnity("{\"type\":\"stop-recording\"}", unityEndpoint, unitySendClient);
                 Console.WriteLine("Stop recording requested from web UI.");
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
@@ -274,7 +229,7 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 400, "text/plain", Encoding.UTF8.GetBytes("Invalid cells value"));
                     break;
                 }
-                BroadcastToUnity($"{{\"type\":\"grid-size\",\"cells\":{cells}}}", unityClients, unityClientsLock);
+                SendToUnity($"{{\"type\":\"grid-size\",\"cells\":{cells}}}", unityEndpoint, unitySendClient);
                 Console.WriteLine($"Grid size ({cells}) requested from web UI.");
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;

@@ -21,7 +21,10 @@
       "Bash(wc -l \"C:/Users/bader/AppData/LocalLow/DefaultCompany/domain_expansion/Sessions/scene_20260816_195606.jsonl\")",
       "Read(//c/Users/bader/AppData/Roaming/Code/User/**)",
       "Bash(git rm *)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "WebSearch",
+      "Bash(pip show *)",
+      "Bash(python3 -c \"import adafruit_bno08x.i2c as m; import inspect; print\\(inspect.signature\\(m.BNO08X_I2C.__init__\\)\\); print\\(getattr\\(m,'_BNO08X_DEFAULT_ADDRESS', 'n/a'\\)\\)\")"
     ]
   }
 }
