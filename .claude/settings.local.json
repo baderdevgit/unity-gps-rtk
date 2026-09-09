@@ -24,7 +24,12 @@
       "Bash(python3 -c ' *)",
       "WebSearch",
       "Bash(pip show *)",
-      "Bash(python3 -c \"import adafruit_bno08x.i2c as m; import inspect; print\\(inspect.signature\\(m.BNO08X_I2C.__init__\\)\\); print\\(getattr\\(m,'_BNO08X_DEFAULT_ADDRESS', 'n/a'\\)\\)\")"
+      "Bash(python3 -c \"import adafruit_bno08x.i2c as m; import inspect; print\\(inspect.signature\\(m.BNO08X_I2C.__init__\\)\\); print\\(getattr\\(m,'_BNO08X_DEFAULT_ADDRESS', 'n/a'\\)\\)\")",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "mcp__visualize__read_me",
+      "mcp__visualize__show_widget",
+      "Bash(python -c ' *)"
     ]
   }
 }

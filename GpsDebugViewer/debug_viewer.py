@@ -7,16 +7,20 @@ the "receive from Pi" half of that server:
 
     Pi (gps.py, unchanged) --UDP--> this tool --UDP--> Unity (unchanged)
                                         |
-                                        +--> http://localhost:8000 (live view)
+                                        +--> http://<pc-ip>:5003 (live view)
 
 It listens on the same port the Pi already sends to (5002), forwards every
 message on to Unity exactly as Program.cs would (so Unity keeps working
 normally, no need to change gps.py or any port forwarding), and ALSO shows a
 live webpage with a grid, current position, breadcrumb trail, and staleness
-stats.
+stats. The webpage defaults to port 5003 - the same port Server/Program.cs
+uses for the mobile UI - so it's reachable from your phone the same way,
+with no extra network/firewall setup, since the C# server is stopped while
+this runs anyway.
 
 How to use it: stop the C# server, run this script on the same machine
-instead, then watch both Unity and http://localhost:8000 side by side.
+instead, then watch both Unity and the debug page (on your PC or phone)
+side by side.
     - If Unity freezes but this page keeps updating smoothly -> Unity-side bug.
     - If this page ALSO freezes/goes stale -> the problem is upstream of
       Unity entirely (Pi, network, or the GPS module), not Unity's fault.
@@ -366,7 +370,7 @@ def main():
     parser.add_argument("--pi-port", type=int, default=5002, help="UDP port to receive from the Pi on (default: 5002, matches Server/Program.cs)")
     parser.add_argument("--unity-port", type=int, default=5001, help="UDP port to forward messages to on localhost for Unity (default: 5001)")
     parser.add_argument("--no-forward", action="store_true", help="Don't forward to Unity at all - use this to test the Pi/network in isolation")
-    parser.add_argument("--http-port", type=int, default=8000, help="Port for the live debug webpage (default: 8000)")
+    parser.add_argument("--http-port", type=int, default=5003, help="Port for the live debug webpage (default: 5003, matching Server/Program.cs's webPort - since the C# server is stopped while this runs, this is reachable at the same address/port you already use for the mobile UI, e.g. from your phone)")
     parser.add_argument("--verbose", action="store_true", help="Also log IMU heading messages, not just GPS fixes")
     args = parser.parse_args()
 

@@ -17,6 +17,7 @@ import math
 
 import board
 import busio
+import digitalio
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR, BNO_REPORT_LINEAR_ACCELERATION
 
@@ -49,7 +50,7 @@ def quaternion_multiply(q1, q2):
 
 # Must match gps.py's calibrated heading offset exactly (see gps.py for why
 # this constant exists - quaternion_to_heading's own +90 baseline).
-HEADING_OFFSET_DEG = -73.7
+HEADING_OFFSET_DEG = 46.3  # was 16.3, +30 more after the arrow was still off to the left
 
 
 def _cross(a, b):
@@ -74,28 +75,56 @@ def rotate_body_accel_to_world(accel_xyz, i, j, k, real):
 _current_i2c = None
 
 
+_reset_pin = None
+
+
 def connect():
     # Release the previous bus before acquiring a new one - skipping this
     # leaves the I2C peripheral locked, so every reconnect after the first
     # silently fails to re-acquire it.
-    global _current_i2c
+    global _current_i2c, _reset_pin
     if _current_i2c is not None:
         try:
             _current_i2c.deinit()
         except Exception:
             pass
 
+    # RST is wired to GPIO17 (physical pin 11) instead of straight to 3.3V.
+    # NOT passed to BNO08X_I2C below - the library's own hard_reset() pulse
+    # (HIGH->LOW->HIGH, 10ms each) consistently broke the connection (3/3
+    # attempts failed identically), which is more than a one-off timing
+    # race, so back off the pulse for now and just hold it released
+    # ourselves. Keeps the wiring in place (so it's driven, not floating)
+    # without triggering the library's toggle sequence.
+    if _reset_pin is None:
+        _reset_pin = digitalio.DigitalInOut(board.D17)
+        _reset_pin.direction = digitalio.Direction.OUTPUT
+        _reset_pin.value = True  # active-LOW - held high = released
+
     _current_i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
     # ADO reads high on this particular board despite being wired to GND, so
-    # it answers on the secondary address (0x4B) instead of the default 0x4A.
-    imu = BNO08X_I2C(_current_i2c, address=0x4B)
+    imu = BNO08X_I2C(_current_i2c, address=0x4A)
     imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
     imu.enable_feature(BNO_REPORT_LINEAR_ACCELERATION)
     return imu
 
 
 def main():
-    imu = connect()
+    # A fresh RST pulse means the chip may need a moment to finish booting
+    # before it's ready to talk - a single flaky first attempt shouldn't
+    # crash the whole script, so retry a few times before giving up.
+    imu = None
+    for attempt in range(1, 4):
+        try:
+            imu = connect()
+            break
+        except Exception as e:
+            print("Connect attempt %d/3 failed (%s)" % (attempt, e))
+            if attempt < 3:
+                time.sleep(1)
+    if imu is None:
+        print("Could not connect after 3 attempts - giving up.")
+        sys.exit(1)
     print("IMU connected. Reading... (Ctrl+C to stop)")
 
     consecutive_failures = 0

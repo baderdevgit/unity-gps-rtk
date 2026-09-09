@@ -18,6 +18,7 @@ import time
 
 import board
 import busio
+import digitalio
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR, BNO_REPORT_LINEAR_ACCELERATION
 
@@ -37,7 +38,7 @@ MOUNT_CORRECTION_QUATERNION = (
     -_MOUNT_REFERENCE_QUATERNION[2],
     _MOUNT_REFERENCE_QUATERNION[3],
 )
-HEADING_OFFSET_DEG = -73.7
+HEADING_OFFSET_DEG = 46.3  # was 16.3, +30 more after the arrow was still off to the left
 
 
 def quaternion_multiply(q1, q2):
@@ -89,21 +90,31 @@ _CUBE_EDGES = [
 
 
 _current_i2c = None
+_reset_pin = None
 
 
 def connect():
     # Release the previous bus before acquiring a new one - skipping this
     # leaves the I2C peripheral locked, so every reconnect after the first
     # silently fails to re-acquire it.
-    global _current_i2c
+    global _current_i2c, _reset_pin
     if _current_i2c is not None:
         try:
             _current_i2c.deinit()
         except Exception:
             pass
 
+    # RST is wired to GPIO17 (physical pin 11) instead of straight to 3.3V.
+    # NOT passed to BNO08X_I2C below - the library's own hard_reset() pulse
+    # consistently broke the connection in testing, so back off the pulse
+    # for now and just hold it released ourselves.
+    if _reset_pin is None:
+        _reset_pin = digitalio.DigitalInOut(board.D17)
+        _reset_pin.direction = digitalio.Direction.OUTPUT
+        _reset_pin.value = True  # active-LOW - held high = released
+
     _current_i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
-    imu = BNO08X_I2C(_current_i2c, address=0x4B)
+    imu = BNO08X_I2C(_current_i2c, address=0x4A)
     imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
     imu.enable_feature(BNO_REPORT_LINEAR_ACCELERATION)
     return imu
@@ -140,7 +151,19 @@ def main(stdscr):
     sys.stdout = open(os.devnull, "w")
     sys.stderr = open(os.devnull, "w")
 
-    imu = connect()
+    # A fresh RST pulse means the chip may need a moment to finish booting
+    # before it's ready to talk - retry a few times rather than crashing on
+    # a single flaky first attempt.
+    imu = None
+    for _attempt in range(3):
+        try:
+            imu = connect()
+            break
+        except Exception:
+            time.sleep(1)
+    if imu is None:
+        imu = connect()  # let the final attempt's exception propagate normally
+
     consecutive_failures = 0
 
     while True:

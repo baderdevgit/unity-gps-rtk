@@ -50,6 +50,7 @@ import serial
 from pynmeagps import NMEAReader
 import board
 import busio
+import digitalio
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR, BNO_REPORT_LINEAR_ACCELERATION
 
@@ -143,7 +144,7 @@ def quaternion_multiply(q1, q2):
 # mount correction above cancels the raw quaternion back to identity at the
 # reference pose. Calibrated by pointing the rig at true north and reading
 # what came out (73.7 degrees) - subtracting that here makes north read 0.
-HEADING_OFFSET_DEG = -73.7
+HEADING_OFFSET_DEG = 46.3  # was 16.3, +30 more after the arrow was still off to the left
 
 # Max plausible heading change in one ~100ms tick before it's treated as
 # suspected sensor corruption rather than real rotation. The known BNO08x/
@@ -288,15 +289,39 @@ class NtripClient(object):
         self.imu = None
         self.heading = 0.0
         self.heading_lock = threading.Lock()
+        # last_gga_raw is written by the NMEA reader thread and read by the
+        # RTCM loop (for the periodic resend to the caster), so it needs a
+        # lock now that those live on different threads.
         self.last_gga_raw = None
+        self.gga_lock = threading.Lock()
+        self._gps_thread_started = False
         self.fix_seq = 0
+        # Dedicated clean log - just fix summaries, none of the raw NMEA/IMU/
+        # reconnect noise that's also printed to the console. Overwritten
+        # each run so it only ever holds the latest test.
+        self.fix_log = open("fix_readings.txt", "w")
+        # For "+Ns since script start" in the fix log below, so a delay like
+        # "no real movement for the first ~20s" is easy to correlate against
+        # a known "I started walking at T+30s" without doing wall-clock math.
+        self.start_time = time.time()
         self.last_satellite_count = 0
-        try:
-            self.imu = self._connect_imu()
-            sys.stderr.write("IMU (BNO08x) ready.\n")
-            threading.Thread(target=self.runImuLoop, daemon=True).start()
-        except Exception as e:
-            sys.stderr.write("IMU (BNO08x) not available (%s) - heading will be omitted.\n" % e)
+        # A single transient I2C glitch during connect (the same flakiness
+        # that motivated the runtime reconnect logic below) shouldn't be
+        # enough to give up on the IMU for the whole session - retry a few
+        # times before actually omitting heading.
+        imu_connect_attempts = 3
+        for attempt in range(1, imu_connect_attempts + 1):
+            try:
+                self.imu = self._connect_imu()
+                sys.stderr.write("IMU (BNO08x) ready.\n")
+                threading.Thread(target=self.runImuLoop, daemon=True).start()
+                break
+            except Exception as e:
+                sys.stderr.write("IMU (BNO08x) connect attempt %d/%d failed (%s)\n" % (attempt, imu_connect_attempts, e))
+                if attempt < imu_connect_attempts:
+                    time.sleep(1)
+                else:
+                    sys.stderr.write("IMU (BNO08x) not available after %d attempts - heading will be omitted.\n" % imu_connect_attempts)
 
         if UDP_Port:
             self.UDP_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -426,10 +451,22 @@ class NtripClient(object):
             except Exception:
                 pass
 
+        # RST is wired to GPIO17 (physical pin 11) instead of straight to
+        # 3.3V. NOT passed to BNO08X_I2C below - the library's own
+        # hard_reset() pulse (HIGH->LOW->HIGH, 10ms each) consistently broke
+        # the connection (3/3 attempts failed identically in testing), which
+        # is more than a one-off timing race, so back off the pulse for now
+        # and just hold it released ourselves. Keeps the wiring in place (so
+        # it's driven, not floating) without triggering the library's toggle
+        # sequence.
+        if getattr(self, "_reset_pin", None) is None:
+            self._reset_pin = digitalio.DigitalInOut(board.D17)
+            self._reset_pin.direction = digitalio.Direction.OUTPUT
+            self._reset_pin.value = True  # active-LOW - held high = released
+
         self._i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
         # ADO reads high on this board despite being wired to GND, so it
-        # answers on the secondary address (0x4B) instead of the default 0x4A.
-        imu = BNO08X_I2C(self._i2c, address=0x4B)
+        imu = BNO08X_I2C(self._i2c, address=0x4A)
         imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
         # Also enabled (even though linear acceleration itself is unused
         # here) to match the verified-working test script exactly - only
@@ -562,6 +599,118 @@ class NtripClient(object):
                     "timestamp": now,
                 })
 
+    def runGpsLoop(self):
+        """Drains NMEA sentences from the receiver continuously, on its own
+        thread.
+
+        This used to live inside readData()'s RTCM loop, reading exactly one
+        sentence per socket.recv() - so NMEA was consumed at whatever rate
+        correction packets happened to arrive, NOT at the rate the receiver
+        produces sentences. With GSV alone emitting a dozen-plus messages a
+        second at 30+ satellites, the receiver outsprints that loop easily,
+        the serial input buffer backs up until it saturates, and every fix
+        read out is tens of seconds stale. Measured directly: GNGGA
+        timestamps were running a rock-steady 44s behind wall clock.
+
+        Draining here, as fast as sentences arrive, keeps the buffer empty so
+        a fix is processed the moment the receiver emits it.
+        """
+        while True:
+            try:
+                (raw_data, parsed_data) = self.nmr.read()
+            except Exception as e:
+                sys.stderr.write("NMEA read error (%s)\n" % e)
+                continue
+
+            if raw_data is None or bytes("GNGGA", 'ascii') not in raw_data:
+                continue
+
+            with self.gga_lock:
+                self.last_gga_raw = raw_data
+
+            print(raw_data)
+            sentence = raw_data.decode('ascii', errors='replace')
+            # Satellite count (field 7) is present even with no fix yet
+            # (e.g. "00") - tracked separately from parse_gngga_sentence
+            # below, which bails out entirely when lat/lon are empty, so this
+            # still updates during the "0 satellites, no fix" stretch that's
+            # actually the interesting one to see.
+            gga_fields = sentence.split(',')
+            if len(gga_fields) > 7 and gga_fields[7].isdigit():
+                self.last_satellite_count = int(gga_fields[7])
+
+            location = self.parse_gngga_sentence(sentence)
+            if location:
+                lat, lon, alt, fix_quality = location
+                fix_status = {
+                    0: "Invalid",
+                    1: "GPS fix",
+                    2: "DGPS fix",
+                    3: "PPS fix",
+                    4: "RTK fixed",
+                    5: "RTK float",
+                    6: "Estimated",
+                    7: "Manual input",
+                    8: "Simulation"
+                }.get(fix_quality, "Unknown")
+                self.fix_seq += 1
+                seq = self.fix_seq
+                # seq and the fix are printed in the SAME statement, on the
+                # SAME stream (stdout), right next to the raw NMEA sentence
+                # above - unlike a separate stderr write, this can't get
+                # reordered relative to it when stdout/stderr are interleaved
+                # by the terminal/capture tool, which was making it ambiguous
+                # which GNSS timestamp a given seq actually belonged to.
+                #
+                # gnssTime is the receiver's own UTC time-of-fix (hhmmss.sss).
+                # Comparing it against the wall clock in brackets is what
+                # exposed the 44s staleness above - keep it visible so that
+                # class of bug can never hide again.
+                gnss_time = gga_fields[1] if len(gga_fields) > 1 else "?"
+                ts = datetime.datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
+                elapsed = time.time() - self.start_time
+                fix_log_line = (f"[{ts}] [+{elapsed:6.1f}s] [SEQ] fix #{seq}: Latitude={lat}, Longitude={lon}, "
+                                f"Fix Status={fix_status}, Satellites={self.last_satellite_count}, gnssTime={gnss_time}")
+                print(fix_log_line)
+                self.fix_log.write(fix_log_line + "\n")
+                self.fix_log.flush()
+
+                # Just reads whatever the IMU thread's most recent fused
+                # heading is, to tag along with the fix - no GPS-derived
+                # correction feeds back into it (orientation and GPS are
+                # deliberately independent; no dead reckoning here).
+                with self.heading_lock:
+                    heading = self.heading
+
+                if self.relay:
+                    self.relay.send({
+                        "lat": lat,
+                        "lon": lon,
+                        "alt": alt,
+                        "fixQuality": fix_quality,
+                        "fixStatus": fix_status,
+                        "heading": heading,
+                        "timestamp": time.time(),
+                        "seq": seq,
+                    })
+
+            if self.gps_file:
+                self.gps_file.write(raw_data)
+                self.gps_file.flush()
+
+    def waitForGGA(self, timeout=10):
+        """Most recent raw GNGGA the reader thread has seen, waiting up to
+        `timeout` seconds for the first one. Replaces the old getGGABytes(),
+        which did its own nmr.read() and would now race the reader thread for
+        sentences (the same class of bug as the resend-steals-a-fix one)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.gga_lock:
+                if self.last_gga_raw is not None:
+                    return self.last_gga_raw
+            time.sleep(0.1)
+        return None
+
     def getMountPointBytes(self):
         mountPointString = "GET %s HTTP/1.1\r\nUser-Agent: %s\r\nAuthorization: Basic %s\r\n" % (
             self.mountpoint, useragent, self.user)
@@ -575,15 +724,12 @@ class NtripClient(object):
             print(mountPointString)
         return bytes(mountPointString, 'ascii')
 
-    def getGGABytes(self):
-        while True:
-            (raw_data, parsed_data) = self.nmr.read()
-            if bytes("GNGGA", 'ascii') in raw_data:
-                return raw_data
 
     def __del__(self):
         if getattr(self, "gps_file", None):
             self.gps_file.close()
+        if getattr(self, "fix_log", None):
+            self.fix_log.close()
         if getattr(self, "relay", None):
             self.relay.close()
 
@@ -606,6 +752,13 @@ class NtripClient(object):
         return lat, lon, alt, fix_quality
 
     def readData(self):
+        # Drain NMEA on its own thread, independent of the RTCM loop below.
+        # Started once (not per reconnect) since the serial port outlives any
+        # individual caster connection.
+        if not self._gps_thread_started:
+            threading.Thread(target=self.runGpsLoop, daemon=True).start()
+            self._gps_thread_started = True
+
         reconnectTry = 1
         sleepTime = 1
         if self.maxConnectTime > 0:
@@ -667,7 +820,12 @@ class NtripClient(object):
                             elif (line.find("ICY 200 OK") >= 0
                                   or line.find("HTTP/1.0 200 OK") >= 0
                                   or line.find("HTTP/1.1 200 OK") >= 0):
-                                self.socket.sendall(self.getGGABytes())
+                                initial_gga = self.waitForGGA()
+                                if initial_gga is not None:
+                                    self.socket.sendall(initial_gga)
+                                else:
+                                    sys.stderr.write("No GGA available yet to send to caster - "
+                                                     "corrections may not start until the next resend.\n")
 
                     data = "Initial data"
                     lastGGAsend = time.time()
@@ -677,92 +835,22 @@ class NtripClient(object):
                             data = self.socket.recv(self.buffer)
                             self.stream.write(data)
 
-                            (raw_data, parsed_data) = self.nmr.read()
-                            if bytes("GNGGA", 'ascii') in raw_data:
-                                self.last_gga_raw = raw_data
-                                print(raw_data)
-                                sentence = raw_data.decode('ascii')
-                                # Satellite count (field 7) is present even
-                                # with no fix yet (e.g. "00") - tracked
-                                # separately from parse_gngga_sentence below,
-                                # which bails out entirely when lat/lon are
-                                # empty, so this still updates during the
-                                # "0 satellites, no fix" stretch that's
-                                # actually the interesting one to see.
-                                gga_fields = sentence.split(',')
-                                if len(gga_fields) > 7 and gga_fields[7].isdigit():
-                                    self.last_satellite_count = int(gga_fields[7])
-                                location = self.parse_gngga_sentence(sentence)
-                                if location:
-                                    lat, lon, alt, fix_quality = location
-                                    fix_status = {
-                                        0: "Invalid",
-                                        1: "GPS fix",
-                                        2: "DGPS fix",
-                                        3: "PPS fix",
-                                        4: "RTK fixed",
-                                        5: "RTK float",
-                                        6: "Estimated",
-                                        7: "Manual input",
-                                        8: "Simulation"
-                                    }.get(fix_quality, "Unknown")
-                                    self.fix_seq += 1
-                                    seq = self.fix_seq
-                                    # seq and the fix are printed in the SAME
-                                    # statement, on the SAME stream (stdout),
-                                    # right next to the raw NMEA sentence
-                                    # above - unlike a separate stderr write,
-                                    # this can't get reordered relative to it
-                                    # when stdout/stderr are interleaved by
-                                    # the terminal/capture tool, which was
-                                    # making it ambiguous which GNSS timestamp
-                                    # a given seq actually belonged to.
-                                    ts = datetime.datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
-                                    print(f"[{ts}] [SEQ] fix #{seq}: Latitude={lat}, Longitude={lon}, Fix Status={fix_status}")
-
-                                    # Just reads whatever the IMU thread's most
-                                    # recent fused heading is, to tag along
-                                    # with the fix - no GPS-derived correction
-                                    # feeds back into it (orientation and GPS
-                                    # are deliberately independent; no dead
-                                    # reckoning here).
-                                    with self.heading_lock:
-                                        heading = self.heading
-
-                                    if self.relay:
-                                        self.relay.send({
-                                            "lat": lat,
-                                            "lon": lon,
-                                            "alt": alt,
-                                            "fixQuality": fix_quality,
-                                            "fixStatus": fix_status,
-                                            "heading": heading,
-                                            "timestamp": time.time(),
-                                            "seq": seq,
-                                        })
-                                if self.gps_file:
-                                    self.gps_file.write(raw_data)
-                                    self.gps_file.flush()
-
                             if self.UDP_socket:
                                 self.UDP_socket.sendto(data, ('<broadcast>', self.UDP_Port))
 
                             # Periodically resend GGA so the VRS caster keeps
                             # generating corrections for your current position.
-                            # Reuses the most recently parsed sentence (cached
-                            # above) instead of calling getGGABytes() here -
-                            # that method does its own self.nmr.read() loop,
-                            # which would silently steal one GNGGA sentence
-                            # straight out of the stream this loop is also
-                            # reading from, dropping a real fix every time a
-                            # resend happens to land (this was happening every
-                            # ~gga_resend_interval seconds, every single fix).
+                            # Uses whatever the reader thread last saw - this
+                            # loop must never read NMEA itself, or it competes
+                            # with that thread for sentences.
                             if time.time() - lastGGAsend >= self.gga_resend_interval:
-                                gga_to_resend = self.last_gga_raw if self.last_gga_raw is not None else self.getGGABytes()
-                                self.socket.sendall(gga_to_resend)
-                                lastGGAsend = time.time()
-                                if self.verbose:
-                                    sys.stderr.write("Resent GGA to caster\n")
+                                with self.gga_lock:
+                                    gga_to_resend = self.last_gga_raw
+                                if gga_to_resend is not None:
+                                    self.socket.sendall(gga_to_resend)
+                                    lastGGAsend = time.time()
+                                    if self.verbose:
+                                        sys.stderr.write("Resent GGA to caster\n")
 
                             if self.maxConnectTime:
                                 if datetime.datetime.now() > connectTime + EndConnect:
