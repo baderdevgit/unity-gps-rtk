@@ -14,11 +14,10 @@ Then heavily based on a unavco original.
     GNU General Public License for more details.
 
 MODIFIED:
-  - Attempts to configure the LC29H fix rate via $PQTMCFGFIXRATE at startup
-    (checksum computed automatically - no more hand-typed checksums).
-  - Reads back and prints the module's response so you know immediately
-    whether the rate change was accepted or rejected (some LC29H(DA)
-    firmware versions reject this with ERROR,1 - known Quectel forum issue).
+  - Talks to a u-blox ZED-F9P (SparkFun GPS-RTK-SMA) over I2C via
+    ublox_i2c.py, configuring it at startup for 20Hz GGA-only output with
+    high-precision coordinates, and reporting whether each setting was
+    acknowledged.
   - Periodically re-sends GGA to the NTRIP caster on a timer (not just once
     at connection start) - VRS casters generally expect refreshed position
     updates to keep the virtual base station synced to you.
@@ -46,8 +45,8 @@ import json
 import threading
 from optparse import OptionParser
 
-import serial
 from pynmeagps import NMEAReader
+from ublox_i2c import DEFAULT_ADDRESS, UbloxI2C, configure_ublox, parse_constellations
 import board
 import busio
 import digitalio
@@ -62,21 +61,6 @@ factor = 3  # How much the sleep time increases with each failed attempt
 maxReconnect = 1
 maxReconnectTime = 1200
 sleepTime = 3  # So the first one is 1 second
-
-
-def nmea_checksum(payload):
-    """Compute the XOR checksum for an NMEA/PQTM payload (everything
-    between '$' and '*', not including either character)."""
-    cksum = 0
-    for c in payload:
-        cksum ^= ord(c)
-    return "%02X" % cksum
-
-
-def build_pqtm_command(payload):
-    """Build a full $PQTM... sentence with correct checksum + CRLF, as
-    bytes ready for the serial port (matches what _sendAndCapture expects)."""
-    return ("$%s*%s\r\n" % (payload, nmea_checksum(payload))).encode('ascii')
 
 
 # --- BNO08x IMU, over I2C - fused absolute heading, no position estimate --
@@ -161,6 +145,22 @@ def _heading_delta_deg(a, b):
     return (a - b + 180.0) % 360.0 - 180.0
 
 
+def rotate_horizontal_deg(east, north, delta_deg):
+    """Rotates a horizontal (east, north) vector so its compass bearing
+    increases by delta_deg (i.e. clockwise on a north-up map).
+
+    Needed because the mount correction and HEADING_OFFSET_DEG are applied to
+    heading but NOT to the quaternion used to rotate acceleration into world
+    frame - so without this, heading is expressed in the corrected frame
+    while acceleration is still in the sensor's own world frame, ~46 degrees
+    off. Same physical vector, two different frames, which showed up as
+    movement drifting off at an angle that didn't match real motion.
+    """
+    rad = math.radians(delta_deg)
+    c, s = math.cos(rad), math.sin(rad)
+    return (east * c + north * s, -east * s + north * c)
+
+
 def _cross(a, b):
     return (
         a[1] * b[2] - a[2] * b[1],
@@ -241,7 +241,8 @@ class NtripClient(object):
                  headerOutput=False,
                  maxConnectTime=0,
                  gps_file_path=None,
-                 fix_rate_ms=None,
+                 fix_rate_ms=50,
+                 constellations=("gps",),
                  gga_resend_interval=10,
                  relay_host=None,
                  relay_port=5002,
@@ -264,14 +265,17 @@ class NtripClient(object):
         self.maxConnectTime = maxConnectTime
         self.socket = None
         self.fix_rate_ms = fix_rate_ms
+        self.constellations = constellations
         self.gga_resend_interval = gga_resend_interval
 
-        self.stream = serial.Serial('/dev/ttyS0', 115200, timeout=3)
-
-        self.queryFirmwareVersion()
-
-        if self.fix_rate_ms:
-            self.configureFixRate(self.fix_rate_ms)
+        self.stream = UbloxI2C()
+        try:
+            configure_ublox(self.stream, self.fix_rate_ms, self.constellations,
+                            log=lambda message: sys.stderr.write(message + "\n"))
+        except OSError as e:
+            sys.stderr.write("No u-blox receiver responding on I2C at 0x%02X (%s) - check the "
+                             "Qwiic cable and `sudo i2cdetect -y 1`.\n" % (DEFAULT_ADDRESS, e))
+            raise
 
         self.nmr = NMEAReader(self.stream)
 
@@ -329,87 +333,6 @@ class NtripClient(object):
             self.UDP_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         else:
             self.UDP_socket = None
-
-    def _sendAndCapture(self, cmd_bytes, label, wait_seconds=2):
-        """Write a command to the serial port and capture whatever comes
-        back for wait_seconds. Returns the raw bytes captured."""
-        sys.stderr.write("Sending %s: %s" % (label, cmd_bytes.decode('ascii', errors='replace')))
-        self.stream.write(cmd_bytes)
-        self.stream.flush()
-
-        time.sleep(0.3)
-        response = b""
-        deadline = time.time() + wait_seconds
-        while time.time() < deadline:
-            waiting = self.stream.in_waiting
-            if waiting:
-                response += self.stream.read(waiting)
-            else:
-                time.sleep(0.05)
-        return response
-
-    def queryFirmwareVersion(self):
-        """Send $PQTMVERNO and print the module's firmware string, so it
-        can be compared against known forum reports of the fix-rate bug."""
-        cmd = build_pqtm_command("PQTMVERNO")
-        response = self._sendAndCapture(cmd, "firmware version query")
-        if b"PQTMVERNO" in response:
-            for line in response.split(b"\r\n"):
-                if b"PQTMVERNO" in line:
-                    sys.stderr.write("Firmware version: %s\n" % line.decode('ascii', errors='replace'))
-        else:
-            sys.stderr.write("No PQTMVERNO response seen (raw bytes: %s)\n" % response[:200])
-
-    def configureFixRate(self, rate_ms):
-        """Attempt to set the GNSS fix/output rate. Tries PQTMCFGFIXRATE
-        first, then falls back to PAIR050 if no clear ACK was seen -
-        two different command families reported in Quectel forum threads
-        as behaving differently across LC29H(DA) firmware builds.
-        Known issue: some LC29H(DA) firmware silently ignores or rejects
-        both, per multiple Quectel forum reports as of mid-2026."""
-
-        # Attempt 1: PQTMCFGFIXRATE
-        cmd = build_pqtm_command("PQTMCFGFIXRATE,W,%d" % rate_ms)
-        response = self._sendAndCapture(cmd, "PQTMCFGFIXRATE")
-
-        pqtm_ok = False
-        if b"PQTMCFGFIXRATE" in response:
-            if b"ERROR" in response:
-                sys.stderr.write(
-                    "PQTMCFGFIXRATE REJECTED by module.\nResponse: %s\n" % response
-                )
-            elif b"OK" in response:
-                sys.stderr.write("PQTMCFGFIXRATE ACCEPTED. Response: %s\n" % response)
-                pqtm_ok = True
-            else:
-                sys.stderr.write("PQTMCFGFIXRATE response (unclear): %s\n" % response)
-        else:
-            sys.stderr.write(
-                "No PQTMCFGFIXRATE response seen (module likely ignored it silently).\n"
-            )
-
-        if pqtm_ok:
-            return
-
-        # Attempt 2: PAIR050 fallback (different command family, some
-        # forum reports suggest it behaves differently on some builds)
-        sys.stderr.write("Trying PAIR050 fallback...\n")
-        # PAIR sentences use the same $...*checksum framing as PQTM ones,
-        # just a different payload prefix - reuse the same checksum logic.
-        pair_payload = "PAIR050,%d" % rate_ms
-        pair_cmd = ("$%s*%s\r\n" % (pair_payload, nmea_checksum(pair_payload))).encode('ascii')
-        response2 = self._sendAndCapture(pair_cmd, "PAIR050")
-
-        if b"PAIR001" in response2 or b"PAIR050" in response2:
-            sys.stderr.write("PAIR050 response: %s\n" % response2)
-        else:
-            sys.stderr.write(
-                "No PAIR050 response seen either (raw bytes: %s).\n"
-                "Both command families were ignored/rejected - this points to a "
-                "firmware-level limitation rather than a syntax issue. Check the "
-                "firmware version above against Quectel forum reports, and look "
-                "for a firmware update from Quectel/Waveshare.\n" % response2[:200]
-            )
 
     def setPosition(self, lat, lon):
         self.flagN = "N"
@@ -559,6 +482,12 @@ class NtripClient(object):
                 continue
             stale_count = 0
 
+            # Heading in the sensor's OWN world frame, before any mount/offset
+            # correction - kept because the difference between it and the
+            # corrected heading below is exactly the frame rotation that has
+            # to be applied to acceleration too (see rotate_horizontal_deg).
+            heading_raw = quaternion_to_heading(i, j, k, real)
+
             corrected_i, corrected_j, corrected_k, corrected_real = quaternion_multiply(
                 (i, j, k, real), MOUNT_CORRECTION_QUATERNION
             )
@@ -583,12 +512,20 @@ class NtripClient(object):
             with self.heading_lock:
                 self.heading = heading
 
-            # Uses the RAW (uncorrected) quaternion - this is the sensor's
-            # true physical orientation, which is what's needed to rotate its
-            # own raw accelerometer reading into real world ENU. The mount
-            # correction above only matters for interpreting heading relative
-            # to the vehicle's forward direction, not for this.
-            accel_east, accel_north, _accel_up = rotate_body_accel_to_world(accel_body, i, j, k, real)
+            # Rotating body-frame acceleration by the RAW quaternion lands it
+            # in the sensor's own world frame - which is NOT the frame heading
+            # is reported in, since heading also gets the mount correction and
+            # HEADING_OFFSET_DEG on top. Applying the same net rotation here
+            # (corrected heading minus raw heading) puts acceleration in the
+            # same frame as heading, so "north" means the same thing in both.
+            # Without this, movement drifts off at roughly the offset angle.
+            accel_east_sensor, accel_north_sensor, _accel_up = rotate_body_accel_to_world(
+                accel_body, i, j, k, real
+            )
+            frame_correction_deg = _heading_delta_deg(heading, heading_raw)
+            accel_east, accel_north = rotate_horizontal_deg(
+                accel_east_sensor, accel_north_sensor, frame_correction_deg
+            )
 
             if self.relay:
                 self.relay.send({
@@ -941,9 +878,14 @@ if __name__ == '__main__':
                        help="Write headers to stderr")
     parser.add_option("--HeaderFile", type="string", dest="headerFile", default=None,
                        help="Write headers to this file, instead of stderr.")
-    parser.add_option("--fixrate", type="int", dest="fixrate", default=None,
-                       help="Attempt to set GNSS fix rate in milliseconds via PQTMCFGFIXRATE "
-                            "(e.g. 100 for 10Hz, 200 for 5Hz). May be rejected on some LC29H(DA) firmware.")
+    parser.add_option("--constellations", type="string", dest="constellations", default="gps",
+                       help="Comma-separated satellite systems: gps,gal,glo,bds. The ZED-F9P's max rate "
+                            "drops as more are enabled: gps alone reaches 20Hz with RTK, gps,gal 15Hz, "
+                            "all four only 7Hz. More systems = more satellites = sturdier RTK. "
+                            "Default: %default")
+    parser.add_option("--fixrate", type="int", dest="fixrate", default=50,
+                       help="GNSS measurement period in milliseconds (50 = 20Hz, the ZED-F9P's RTK maximum; 100 = 10Hz). "
+                            "Default: %default")
     parser.add_option("--ggainterval", type="int", dest="ggainterval", default=10,
                        help="Seconds between GGA resends to the caster while connected. Default: %default")
     parser.add_option("--relayhost", type="string", dest="relayhost", default=None,
@@ -960,6 +902,10 @@ if __name__ == '__main__':
     ntripArgs['height'] = options.height
     ntripArgs['host'] = options.host
     ntripArgs['fix_rate_ms'] = options.fixrate
+    try:
+        ntripArgs['constellations'] = parse_constellations(options.constellations)
+    except ValueError as e:
+        parser.error(str(e))
     ntripArgs['gga_resend_interval'] = options.ggainterval
     ntripArgs['relay_host'] = options.relayhost
     ntripArgs['relay_port'] = options.relayport

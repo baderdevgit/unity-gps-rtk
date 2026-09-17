@@ -4,11 +4,11 @@
 set -e
 cd "$(dirname "$0")"
 
-exec python3 -u gps3.py \
+exec python3 -u gps.py \
   -u mojoaerial0101 \
   -p uavdrone \
   -f gpsdata.txt \
-  --fixrate 100 \
+  --fixrate 50 \
   -r 20 \
   --relayhost 65.184.36.188 \
   --relayport 5002 \
