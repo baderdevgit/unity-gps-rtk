@@ -33,6 +33,23 @@ import digitalio
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR, BNO_REPORT_LINEAR_ACCELERATION
 
+# The BNO08x's ADO pin isn't tied down on this breakout, so the address it
+# answers on varies between power-ups. Try both rather than hardcoding one.
+BNO08X_ADDRESSES = (0x4A, 0x4B)
+
+
+def _open_bno08x(i2c):
+    last_error = None
+    for address in BNO08X_ADDRESSES:
+        try:
+            imu = BNO08X_I2C(i2c, address=address)
+            sys.stderr.write("BNO08x found at 0x%02X\n" % address)
+            return imu
+        except Exception as e:
+            last_error = e
+    raise last_error
+
+
 try:
     from adafruit_bno08x import BNO_REPORT_MAGNETOMETER
     HAVE_MAG = True
@@ -79,7 +96,7 @@ def connect():
         _reset_pin.value = True
 
     _current_i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
-    imu = BNO08X_I2C(_current_i2c, address=0x4A)
+    imu = _open_bno08x(_current_i2c)
     imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
     imu.enable_feature(BNO_REPORT_LINEAR_ACCELERATION)
     if HAVE_MAG:
