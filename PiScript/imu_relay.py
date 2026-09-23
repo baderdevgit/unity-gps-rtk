@@ -28,10 +28,19 @@ import sys
 import time
 
 import board
-import busio
+from adafruit_extended_bus import ExtendedI2C
 import digitalio
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR, BNO_REPORT_LINEAR_ACCELERATION
+
+# The IMU lives on its own software (i2c-gpio) bus, /dev/i2c-3 on GPIO23/24,
+# instead of the Pi's hardware I2C. The hardware controller mishandles I2C
+# clock stretching, which the BNO08x relies on - the source of the corrupt
+# reports, frozen readings and wedging. A bit-banged bus stretches properly,
+# and also stops the IMU contending with the 20Hz GPS on the hardware bus.
+# Needs in /boot/firmware/config.txt:
+#   dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=23,i2c_gpio_scl=24,i2c_gpio_delay_us=2
+IMU_I2C_BUS = 3
 
 # The BNO08x's ADO pin isn't tied down on this breakout, so the address it
 # answers on varies between power-ups. Try both rather than hardcoding one.
@@ -114,7 +123,7 @@ def connect():
         _reset_pin.direction = digitalio.Direction.OUTPUT
         _reset_pin.value = True  # active-LOW, held high = released
 
-    _current_i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+    _current_i2c = ExtendedI2C(IMU_I2C_BUS)
     imu = _open_bno08x(_current_i2c)
     imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
     imu.enable_feature(BNO_REPORT_LINEAR_ACCELERATION)

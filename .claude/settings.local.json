@@ -56,7 +56,12 @@
       "Bash(echo \"exit=$?\")",
       "Bash(sed -n '/\\\\[3\\\\]/,$p' run.log)",
       "Bash(cat)",
-      "Bash(python repro.py)"
+      "Bash(python repro.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('imu_calibrate.py',encoding='utf-8'\\).read\\(\\)\\); print\\('parses OK'\\)\")",
+      "Bash(curl -sL https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_BNO08x_RVC/main/adafruit_bno08x_rvc.py)",
+      "WebFetch(domain:learn.adafruit.com)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_BNO08x_RVC/main/examples/bno08x_rvc_simpletest.py\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_BNO08x_RVC/main/README.rst\")"
     ]
   }
 }

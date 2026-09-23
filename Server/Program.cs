@@ -163,6 +163,18 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 await WriteResponse(res, 200, "text/html", Encoding.UTF8.GetBytes(indexHtml));
                 break;
 
+            // Read fresh per request rather than cached at startup like
+            // indexHtml, so edits to the page show up without a restart.
+            case "/position":
+                string positionPath = Path.Combine(AppContext.BaseDirectory, "wwwroot", "position.html");
+                if (!File.Exists(positionPath))
+                {
+                    await WriteResponse(res, 404, "text/plain", Encoding.UTF8.GetBytes("position.html not found"));
+                    break;
+                }
+                await WriteResponse(res, 200, "text/html", await File.ReadAllBytesAsync(positionPath));
+                break;
+
             case "/reset":
                 if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
                 {

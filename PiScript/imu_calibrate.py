@@ -28,10 +28,19 @@ import sys
 import time
 
 import board
-import busio
+from adafruit_extended_bus import ExtendedI2C
 import digitalio
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_ROTATION_VECTOR, BNO_REPORT_LINEAR_ACCELERATION
+
+# The IMU lives on its own software (i2c-gpio) bus, /dev/i2c-3 on GPIO23/24,
+# instead of the Pi's hardware I2C. The hardware controller mishandles I2C
+# clock stretching, which the BNO08x relies on - the source of the corrupt
+# reports, frozen readings and wedging. A bit-banged bus stretches properly,
+# and also stops the IMU contending with the 20Hz GPS on the hardware bus.
+# Needs in /boot/firmware/config.txt:
+#   dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=23,i2c_gpio_scl=24,i2c_gpio_delay_us=2
+IMU_I2C_BUS = 3
 
 # The BNO08x's ADO pin isn't tied down on this breakout, so the address it
 # answers on varies between power-ups. Try both rather than hardcoding one.
@@ -95,7 +104,7 @@ def connect():
         _reset_pin.direction = digitalio.Direction.OUTPUT
         _reset_pin.value = True
 
-    _current_i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+    _current_i2c = ExtendedI2C(IMU_I2C_BUS)
     imu = _open_bno08x(_current_i2c)
     imu.enable_feature(BNO_REPORT_ROTATION_VECTOR)
     imu.enable_feature(BNO_REPORT_LINEAR_ACCELERATION)
@@ -193,13 +202,41 @@ def run_calibration(imu):
     print("     rotating your wrist as you go, for ~20s.")
     print("\nWatching calibration status (want 'High Accuracy'). Ctrl+C when done.\n")
 
+    if not HAVE_MAG:
+        print("WARNING: magnetometer reports unavailable in this library version -")
+        print("         calibration status will be stuck at 0 and mean nothing.\n")
+
     labels = ["Accuracy Unreliable", "Low Accuracy", "Medium Accuracy", "High Accuracy"]
     try:
         while True:
             try:
+                # Reading the magnetometer is what actually makes the status
+                # meaningful: the library caches magnetometer accuracy only
+                # while processing a magnetometer report, and calibration_status
+                # just returns that cached value. Polling status alone leaves it
+                # at its initial 0 forever, which looks exactly like "never
+                # calibrated".
+                mag = imu.magnetic
                 status = imu.calibration_status
                 name = labels[status] if 0 <= status < len(labels) else "unknown(%s)" % status
-                print("  calibration status: %d (%s)" % (status, name))
+                if mag:
+                    strength = math.sqrt(sum(axis * axis for axis in mag))
+                    # Earth's field is ~25-65uT depending on latitude. Much
+                    # above that means something nearby is generating its own
+                    # field, and the compass reference is swamped - which
+                    # shows up as heading that drifts or jumps, and
+                    # calibration that never reaches High Accuracy.
+                    if strength > 100:
+                        judgement = "INTERFERENCE - way above Earth's ~47uT"
+                    elif strength > 70:
+                        judgement = "high - something magnetic is nearby"
+                    else:
+                        judgement = "plausible Earth field"
+                    mag_text = "mag(%7.1f %7.1f %7.1f) |B|=%6.1fuT %s" % (
+                        mag[0], mag[1], mag[2], strength, judgement)
+                else:
+                    mag_text = "mag(no reading)"
+                print("  calibration status: %d (%-19s) %s" % (status, name, mag_text))
             except Exception as e:
                 print("  status read failed (%s)" % e)
             time.sleep(1)

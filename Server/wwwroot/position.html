@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Position (feet)</title>
+<style>
+  html, body { height:100%; }
+  body { font-family: Arial, Helvetica, sans-serif; font-weight:bold; background:#fff; color:#000; text-align:center; padding:20px; margin:0; box-sizing:border-box; text-transform:uppercase;
+         display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  /* Children would otherwise stretch to the body's full width under flex. */
+  body > * { width:100%; max-width:440px; }
+  /* Grid rather than flex so the label and the number keep a shared
+     centerline: the value column reserves room for the longest reading, so
+     digits changing never shifts the layout sideways. */
+  .axis { display:grid; grid-template-columns:auto 3.4em; align-items:baseline; justify-content:center; gap:12px; margin:20px 0; }
+  .axis .label { font-size:3em; text-align:right; font-weight:bold; }
+  .axis .value { font-size:3em; font-variant-numeric:tabular-nums; text-align:left; font-weight:normal; }
+  button { font-family: inherit; font-weight:normal; text-transform:uppercase; width:100%; box-sizing:border-box; font-size:2.5em; padding:20px 32px; border-radius:0; border:2px solid #000; background:#fff; color:#000; margin-top:1in; }
+  button:active { background:#e0e0e0; }
+  #status { margin-top:20px; font-size:0.85em; min-height:1.2em; }
+</style>
+</head>
+<body>
+
+<div class="axis"><span class="label">X:</span><span class="value" id="x">--</span></div>
+<div class="axis"><span class="label">Y:</span><span class="value" id="y">--</span></div>
+<button id="zeroBtn">Zero Out</button>
+
+<div id="status">Waiting for a fix...</div>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const token = params.get('token') || '';
+
+const xEl = document.getElementById('x');
+const yEl = document.getElementById('y');
+const statusEl = document.getElementById('status');
+const zeroBtn = document.getElementById('zeroBtn');
+
+const METERS_PER_DEGREE_LAT = 111320.0;
+const FEET_PER_METER = 3.28084;
+
+// The zero point lives in this browser rather than on the server, so this
+// page can't disturb anything else - Unity's own reset is untouched, and
+// zeroing here has no effect on the rest of the system.
+let origin = null;
+try {
+  const saved = localStorage.getItem('positionOrigin');
+  if (saved) origin = JSON.parse(saved);
+} catch (e) { /* private mode or blocked storage - just start unzeroed */ }
+
+let latest = null;
+
+function toFeet(fix, from) {
+  // Flat-earth approximation, same as the rest of the project uses. Plenty
+  // accurate over the short distances this page is for.
+  const metersPerDegreeLon = METERS_PER_DEGREE_LAT * Math.cos(from.lat * Math.PI / 180);
+  return {
+    x: (fix.lon - from.lon) * metersPerDegreeLon * FEET_PER_METER,
+    y: (fix.lat - from.lat) * METERS_PER_DEGREE_LAT * FEET_PER_METER,
+  };
+}
+
+function render() {
+  if (!latest) return;
+  if (!origin) {
+    xEl.textContent = '--';
+    yEl.textContent = '--';
+    statusEl.textContent = 'Press Zero Out Location to set the origin';
+    statusEl.className = '';
+    return;
+  }
+  const offset = toFeet(latest, origin);
+  xEl.textContent = offset.x.toFixed(1);
+  yEl.textContent = offset.y.toFixed(1);
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/gps.json?token=' + encodeURIComponent(token) + '&t=' + Date.now());
+    if (res.status === 403) {
+      statusEl.textContent = 'Forbidden - open this page with ?token=...';
+      statusEl.className = 'error';
+      return;
+    }
+    if (res.status === 404) {
+      statusEl.textContent = 'No fix yet';
+      statusEl.className = 'stale';
+      return;
+    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+
+    const fix = await res.json();
+    if (typeof fix.lat !== 'number' || typeof fix.lon !== 'number') throw new Error('bad fix');
+    latest = fix;
+    render();
+
+    if (origin) {
+      // fixStatus tells you whether these numbers are trustworthy: without
+      // RTK the absolute position can wander by metres, which at this scale
+      // is very visible.
+      const age = fix.timestamp ? (Date.now() / 1000 - fix.timestamp) : null;
+      let text = fix.fixStatus || 'fix';
+      if (age !== null && age > 3) {
+        text += ' - ' + age.toFixed(0) + 's old';
+        statusEl.className = 'stale';
+      } else {
+        statusEl.className = '';
+      }
+      statusEl.textContent = text;
+    }
+  } catch (e) {
+    statusEl.textContent = 'Connection problem';
+    statusEl.className = 'error';
+  }
+}
+
+zeroBtn.addEventListener('click', () => {
+  if (!latest) {
+    statusEl.textContent = 'No fix yet - nothing to zero to';
+    statusEl.className = 'stale';
+    return;
+  }
+  origin = { lat: latest.lat, lon: latest.lon };
+  try { localStorage.setItem('positionOrigin', JSON.stringify(origin)); } catch (e) { /* not fatal */ }
+  render();
+});
+
+poll();
+setInterval(poll, 500);
+</script>
+
+</body>
+</html>
