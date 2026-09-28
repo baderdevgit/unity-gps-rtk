@@ -127,7 +127,7 @@ def quaternion_to_heading(i, j, k, real):
 # relative to the vehicle. Only used for heading - rotate_body_accel_to_world
 # below already works correctly regardless of mounting, since it's a true
 # 3D rotation of the sensor's actual physical orientation.
-_MOUNT_REFERENCE_QUATERNION = (0.722, 0.030, 0.038, 0.690)  # (i, j, k, real) captured at reference pose
+_MOUNT_REFERENCE_QUATERNION = (0.716, 0.092, 0.087, 0.686)  # (i, j, k, real) captured at reference pose
 MOUNT_CORRECTION_QUATERNION = (
     -_MOUNT_REFERENCE_QUATERNION[0],
     -_MOUNT_REFERENCE_QUATERNION[1],
@@ -149,12 +149,15 @@ def quaternion_multiply(q1, q2):
     return (i, j, k, w)
 
 
-# quaternion_to_heading() has a built-in +90 baseline (it reports the compass
-# bearing of the body's own X-axis, not Y) which shows up even after the
-# mount correction above cancels the raw quaternion back to identity at the
-# reference pose. Calibrated by pointing the rig at true north and reading
-# what came out (73.7 degrees) - subtracting that here makes north read 0.
-HEADING_OFFSET_DEG = 46.3  # was 16.3, +30 more after the arrow was still off to the left
+# Rotates the MOVEMENT frame relative to the avatar's facing, which is the only thing
+# this constant still does: after a reset, facing = heading - heading_at_reset, so any
+# constant cancels out of facing entirely - but HandleFix rotates position by the reset
+# heading, which includes it.
+#
+# 180 for the frame flip (travel came out opposite to facing) + 62 for the bracket's
+# actual mounting angle. Measured consistent across several resets facing different
+# directions, which it never was before the magnetometer had a clean field.
+HEADING_OFFSET_DEG = 242.0
 
 # Max plausible heading change in one ~100ms tick before it's treated as
 # suspected sensor corruption rather than real rotation. The known BNO08x/

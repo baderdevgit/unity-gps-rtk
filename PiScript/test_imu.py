@@ -55,7 +55,7 @@ def quaternion_to_heading(i, j, k, real):
 
 
 # Must match gps.py's calibrated mounting correction exactly.
-_MOUNT_REFERENCE_QUATERNION = (0.722, 0.030, 0.038, 0.690)  # (i, j, k, real) captured at reference pose
+_MOUNT_REFERENCE_QUATERNION = (0.716, 0.092, 0.087, 0.686)  # (i, j, k, real) captured at reference pose
 MOUNT_CORRECTION_QUATERNION = (
     -_MOUNT_REFERENCE_QUATERNION[0],
     -_MOUNT_REFERENCE_QUATERNION[1],
@@ -74,9 +74,30 @@ def quaternion_multiply(q1, q2):
     return (i, j, k, w)
 
 
-# Must match gps.py's calibrated heading offset exactly (see gps.py for why
-# this constant exists - quaternion_to_heading's own +90 baseline).
-HEADING_OFFSET_DEG = 46.3  # was 16.3, +30 more after the arrow was still off to the left
+# Rotates the MOVEMENT frame relative to the avatar's facing, which is the only thing
+# this constant still does: after a reset, facing = heading - heading_at_reset, so any
+# constant cancels out of facing entirely - but HandleFix rotates position by the reset
+# heading, which includes it.
+#
+# 180 for the frame flip (travel came out opposite to facing) + 62 for the bracket's
+# actual mounting angle. Measured consistent across several resets facing different
+# directions, which it never was before the magnetometer had a clean field.
+HEADING_OFFSET_DEG = 242.0
+
+
+_CARDINALS = ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+              "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+
+
+def cardinal(heading):
+    return _CARDINALS[int((heading % 360) / 22.5 + 0.5) % 16]
+
+
+def nearest_cardinal_error(heading):
+    """Degrees off the nearest of N/E/S/W, for calibration: stand facing one
+    of them (by phone compass) and this is the correction to apply."""
+    nearest = round((heading % 360) / 90.0) % 4 * 90
+    return ("N", "E", "S", "W")[nearest // 90], (heading - nearest + 180) % 360 - 180
 
 
 def _cross(a, b):
@@ -196,9 +217,10 @@ def main():
         east, north, up = rotate_body_accel_to_world(accel, i, j, k, real)
 
         print(
-            "heading=%6.1f  quat(i=%6.3f j=%6.3f k=%6.3f real=%6.3f |q|=%.3f)  "
-            "accel_world(E=%5.2f N=%5.2f U=%5.2f)"
-            % (heading, i, j, k, real, magnitude, east, north, up)
+            "%6.1f deg %-3s | error vs %s: %+6.1f | quat(i=%6.3f j=%6.3f k=%6.3f real=%6.3f |q|=%.3f) "
+            "accel(E=%5.2f N=%5.2f U=%5.2f)"
+            % (heading, cardinal(heading), *nearest_cardinal_error(heading),
+               i, j, k, real, magnitude, east, north, up)
         )
 
         time.sleep(0.1)

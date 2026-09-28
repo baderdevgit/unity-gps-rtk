@@ -61,14 +61,22 @@ def _open_bno08x(i2c):
 
 # Same calibration constants gps.py uses - applied to HEADING ONLY, and only
 # when --raw-heading isn't passed.
-_MOUNT_REFERENCE_QUATERNION = (0.722, 0.030, 0.038, 0.690)
+_MOUNT_REFERENCE_QUATERNION = (0.716, 0.092, 0.087, 0.686)
 MOUNT_CORRECTION_QUATERNION = (
     -_MOUNT_REFERENCE_QUATERNION[0],
     -_MOUNT_REFERENCE_QUATERNION[1],
     -_MOUNT_REFERENCE_QUATERNION[2],
     _MOUNT_REFERENCE_QUATERNION[3],
 )
-HEADING_OFFSET_DEG = 46.3
+# Rotates the MOVEMENT frame relative to the avatar's facing, which is the only thing
+# this constant still does: after a reset, facing = heading - heading_at_reset, so any
+# constant cancels out of facing entirely - but HandleFix rotates position by the reset
+# heading, which includes it.
+#
+# 180 for the frame flip (travel came out opposite to facing) + 62 for the bracket's
+# actual mounting angle. Measured consistent across several resets facing different
+# directions, which it never was before the magnetometer had a clean field.
+HEADING_OFFSET_DEG = 242.0
 
 
 def quaternion_to_heading(i, j, k, real):
