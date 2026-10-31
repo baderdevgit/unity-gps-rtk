@@ -208,6 +208,28 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
                 break;
 
+            case "/spawn-wall":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                SendToUnity("{\"type\":\"spawn-wall\"}", unityEndpoint, unitySendClient);
+                Console.WriteLine("Spawn wall requested from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
+            case "/clear-walls":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                SendToUnity("{\"type\":\"clear-walls\"}", unityEndpoint, unitySendClient);
+                Console.WriteLine("Clear walls requested from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
             case "/start-recording":
                 if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
                 {
@@ -271,6 +293,15 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                     await WriteResponse(res, 404, "text/plain", Encoding.UTF8.GetBytes("No snapshot yet"));
                 else
                     await WriteResponse(res, 200, "image/jpeg", jpg);
+                break;
+
+            case "/snapshot.mjpeg":
+                if (req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                await StreamSnapshots(res, snapshots);
                 break;
 
             case "/gps.json":
@@ -367,6 +398,53 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
     }
 }
 
+// One HTTP response that never finishes, with each JPEG written into it as
+// another MIME part (multipart/x-mixed-replace - what every IP camera serves).
+// Browsers render it natively in a plain <img>, so frames appear as fast as
+// Unity pushes them: no per-frame request, no connection setup per frame, and
+// no polling interval putting a ceiling on the rate.
+static async Task StreamSnapshots(HttpListenerResponse res, SnapshotStore snapshots)
+{
+    const string boundary = "frame";
+    res.StatusCode = 200;
+    res.ContentType = $"multipart/x-mixed-replace; boundary={boundary}";
+    res.SendChunked = true;
+    res.Headers.Add("Cache-Control", "no-store");
+
+    long lastVersion = 0;
+    var stream = res.OutputStream;
+    var trailer = Encoding.ASCII.GetBytes("\r\n");
+
+    try
+    {
+        while (true)
+        {
+            byte[]? frame = snapshots.GetNewer(ref lastVersion);
+            if (frame == null)
+            {
+                // Nothing new yet. A short sleep rather than a signal: this is
+                // a local lock check, not a round trip, so 10ms costs nothing
+                // and caps the latency this loop can add at 10ms.
+                await Task.Delay(10);
+                continue;
+            }
+
+            var header = Encoding.ASCII.GetBytes(
+                $"--{boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");
+            await stream.WriteAsync(header);
+            await stream.WriteAsync(frame);
+            await stream.WriteAsync(trailer);
+            await stream.FlushAsync();
+        }
+    }
+    catch (HttpListenerException) { /* viewer closed the tab */ }
+    catch (IOException) { /* connection dropped mid-write */ }
+    finally
+    {
+        try { res.Close(); } catch { }
+    }
+}
+
 static async Task WriteResponse(HttpListenerResponse res, int statusCode, string contentType, byte[] body)
 {
     res.StatusCode = statusCode;
@@ -380,8 +458,23 @@ class SnapshotStore
 {
     private readonly object _lock = new();
     private byte[] _data = Array.Empty<byte>();
-    public void Set(byte[] data) { lock (_lock) _data = data; }
+    private long _version;
+
+    public void Set(byte[] data) { lock (_lock) { _data = data; _version++; } }
     public byte[] Get() { lock (_lock) return _data; }
+
+    // Hands back a frame only when it's newer than the one the caller last
+    // saw, so an MJPEG stream sends each frame exactly once rather than
+    // re-sending whatever is current on a timer.
+    public byte[]? GetNewer(ref long lastVersion)
+    {
+        lock (_lock)
+        {
+            if (_version == lastVersion || _data.Length == 0) return null;
+            lastVersion = _version;
+            return _data;
+        }
+    }
 }
 
 class TextStore

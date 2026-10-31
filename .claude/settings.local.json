@@ -62,7 +62,9 @@
       "WebFetch(domain:learn.adafruit.com)",
       "Bash(curl -sL \"https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_BNO08x_RVC/main/examples/bno08x_rvc_simpletest.py\")",
       "Bash(curl -sL \"https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_BNO08x_RVC/main/README.rst\")",
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(grep -n \"case \\\\\"/\\\\|SendToUnity\" Program.cs)",
+      "PowerShell(Get-Process -Name \"Unity\" -ErrorAction SilentlyContinue)"
     ]
   }
 }

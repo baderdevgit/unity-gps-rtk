@@ -21,6 +21,10 @@
   #placeBtn:active { background:#1e8449; }
   #clearBtn { background:#7f8c8d; }
   #clearBtn:active { background:#616a6b; }
+  #wallBtn { background:#8e44ad; }
+  #wallBtn:active { background:#6c3483; }
+  #clearWallsBtn { background:#7f8c8d; }
+  #clearWallsBtn:active { background:#616a6b; }
   #recordToggleBtn.recording { background:#7f8c8d; }
   #recordToggleBtn.recording:active { background:#616a6b; }
   #status { margin-top:8px; color:#9a9; }
@@ -46,6 +50,10 @@
   <button id="placeBtn">Place Marker</button>
   <button id="clearBtn">Clear Markers</button>
 </div>
+<div class="row">
+  <button id="wallBtn">Spawn Wall</button>
+  <button id="clearWallsBtn">Clear Walls</button>
+</div>
 <button id="recordToggleBtn">Start Recording</button>
 <div id="gridSizeRow">
   <label for="gridSizeSlider">Grid Cells: <span id="gridSizeValue">5</span></label>
@@ -70,11 +78,25 @@
     }
   };
 
-  function refreshPreview() {
-    preview.src = '/snapshot.jpg?token=' + encodeURIComponent(token) + '&t=' + Date.now();
+  // One long-lived MJPEG connection, so frames render as fast as Unity sends
+  // them. The old approach reloaded a still every 1.5s, which capped the
+  // preview at well under 1fps no matter how often Unity uploaded.
+  let pollTimer = null;
+  function startStream() {
+    preview.src = '/snapshot.mjpeg?token=' + encodeURIComponent(token);
   }
-  setInterval(refreshPreview, 1500);
-  refreshPreview();
+
+  // Fallback to the original still-polling if the stream can't be held open
+  // (some mobile proxies buffer multipart responses instead of passing them
+  // through). Slower, but better than a blank panel.
+  preview.onerror = () => {
+    if (pollTimer) return;
+    pollTimer = setInterval(() => {
+      preview.src = '/snapshot.jpg?token=' + encodeURIComponent(token) + '&t=' + Date.now();
+    }, 500);
+  };
+
+  startStream();
 
   const gps = document.getElementById('gps');
   async function refreshGps() {
@@ -145,6 +167,26 @@
     try {
       const res = await fetch('/clear-markers?token=' + encodeURIComponent(token), { method: 'POST' });
       status.textContent = res.ok ? 'Markers cleared.' : 'Failed: ' + res.status;
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  document.getElementById('wallBtn').onclick = async () => {
+    status.textContent = 'Spawning wall...';
+    try {
+      const res = await fetch('/spawn-wall?token=' + encodeURIComponent(token), { method: 'POST' });
+      status.textContent = res.ok ? 'Wall spawned.' : 'Failed: ' + res.status;
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  document.getElementById('clearWallsBtn').onclick = async () => {
+    status.textContent = 'Clearing walls...';
+    try {
+      const res = await fetch('/clear-walls?token=' + encodeURIComponent(token), { method: 'POST' });
+      status.textContent = res.ok ? 'Walls cleared.' : 'Failed: ' + res.status;
     } catch (e) {
       status.textContent = 'Error: ' + e;
     }
