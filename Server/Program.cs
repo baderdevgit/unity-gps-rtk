@@ -34,6 +34,7 @@ var loggedPositionsLock = new object();
 
 var snapshots = new SnapshotStore();
 var latestFix = new TextStore();
+var maze = new MazeState();
 
 // Unity runs on this same PC, so the Server->Unity hop is loopback traffic -
 // no "connection" to accept/track at all under UDP, just a fixed
@@ -42,7 +43,7 @@ var latestFix = new TextStore();
 var unityEndpoint = new IPEndPoint(IPAddress.Loopback, unityPort);
 var unitySendClient = new UdpClient();
 
-_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, loggedPositionsPath, loggedPositionsLock));
+_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, maze, loggedPositionsPath, loggedPositionsLock));
 await RunPiListener(piPort, unityEndpoint, unitySendClient, latestFix, gpsLogPath, gpsLogLock);
 
 static async Task RunPiListener(int port, IPEndPoint unityEndpoint, UdpClient unitySendClient, TextStore latestFix, string gpsLogPath, object gpsLogLock)
@@ -126,7 +127,7 @@ static void SendToUnity(string message, IPEndPoint unityEndpoint, UdpClient unit
     }
 }
 
-static async Task RunWebServer(int port, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, string loggedPositionsPath, object loggedPositionsLock)
+static async Task RunWebServer(int port, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, MazeState maze, string loggedPositionsPath, object loggedPositionsLock)
 {
     var listener = new HttpListener();
     listener.Prefixes.Add($"http://+:{port}/");
@@ -146,11 +147,11 @@ static async Task RunWebServer(int port, string token, string indexHtml, IPEndPo
     while (true)
     {
         var ctx = await listener.GetContextAsync();
-        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, loggedPositionsPath, loggedPositionsLock));
+        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, maze, loggedPositionsPath, loggedPositionsLock));
     }
 }
 
-static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, string loggedPositionsPath, object loggedPositionsLock)
+static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, MazeState maze, string loggedPositionsPath, object loggedPositionsLock)
 {
     try
     {
@@ -160,6 +161,9 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
         switch (req.Url?.AbsolutePath)
         {
             case "/":
+                // Otherwise a phone can keep showing an old copy of the page
+                // after the server has been restarted with a new one.
+                res.Headers["Cache-Control"] = "no-store";
                 await WriteResponse(res, 200, "text/html", Encoding.UTF8.GetBytes(indexHtml));
                 break;
 
@@ -228,6 +232,52 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 SendToUnity("{\"type\":\"clear-walls\"}", unityEndpoint, unitySendClient);
                 Console.WriteLine("Clear walls requested from web UI.");
                 await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
+            case "/generate-maze":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                // Picked here rather than in Unity so the page can show it
+                // straight away, without a reply channel back from Unity.
+                maze.NewSeed();
+                SendToUnity($"{{\"type\":\"generate-maze\",\"seed\":{maze.Seed},\"extend\":{(maze.Extend ? 1 : 0)}}}", unityEndpoint, unitySendClient);
+                Console.WriteLine($"Generate maze requested from web UI (seed {maze.Seed}).");
+                await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(maze.ToJson()));
+                break;
+
+            case "/clear-maze":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                SendToUnity("{\"type\":\"clear-maze\"}", unityEndpoint, unitySendClient);
+                Console.WriteLine("Clear maze requested from web UI.");
+                await WriteResponse(res, 200, "text/plain", Encoding.UTF8.GetBytes("OK"));
+                break;
+
+            case "/maze-extend":
+                if (req.HttpMethod != "POST" || req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                maze.Extend = req.QueryString["enabled"] == "1";
+                SendToUnity($"{{\"type\":\"maze-extend\",\"extend\":{(maze.Extend ? 1 : 0)}}}", unityEndpoint, unitySendClient);
+                Console.WriteLine($"Maze extend-at-exit {(maze.Extend ? "enabled" : "disabled")} from web UI.");
+                await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(maze.ToJson()));
+                break;
+
+            case "/maze.json":
+                if (req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                await WriteResponse(res, 200, "application/json", Encoding.UTF8.GetBytes(maze.ToJson()));
                 break;
 
             case "/start-recording":
@@ -415,11 +465,31 @@ static async Task StreamSnapshots(HttpListenerResponse res, SnapshotStore snapsh
     var stream = res.OutputStream;
     var trailer = Encoding.ASCII.GetBytes("\r\n");
 
+    // Browsers only paint a frame once the next one starts arriving, so the
+    // newest frame stays unseen until another follows it. While Unity is sending
+    // that's a frame of lag; when it isn't, a new viewer would stay blank with
+    // the image already delivered. So a frame nothing has followed goes out once
+    // more - once only, so an idle stream doesn't keep using the viewer's data.
+    byte[]? latest = null;
+    bool repeated = true;
+    var sinceLastFrame = System.Diagnostics.Stopwatch.StartNew();
+
     try
     {
         while (true)
         {
             byte[]? frame = snapshots.GetNewer(ref lastVersion);
+            if (frame != null)
+            {
+                latest = frame;
+                repeated = false;
+            }
+            else if (!repeated && sinceLastFrame.ElapsedMilliseconds >= 200)
+            {
+                frame = latest;
+                repeated = true;
+            }
+
             if (frame == null)
             {
                 // Nothing new yet. A short sleep rather than a signal: this is
@@ -429,6 +499,7 @@ static async Task StreamSnapshots(HttpListenerResponse res, SnapshotStore snapsh
                 continue;
             }
 
+            sinceLastFrame.Restart();
             var header = Encoding.ASCII.GetBytes(
                 $"--{boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");
             await stream.WriteAsync(header);
@@ -475,6 +546,24 @@ class SnapshotStore
             return _data;
         }
     }
+}
+
+// What the web page's maze controls last asked for, so a reloaded or second
+// page shows the current seed and checkbox instead of starting blank.
+class MazeState
+{
+    private volatile int _seed;
+    private volatile bool _extend;
+
+    public int Seed => _seed;
+    public bool Extend { get => _extend; set => _extend = value; }
+
+    // 0 means "none yet", so it's left out of the range. Six digits at most so
+    // it's easy to read off a phone and type into Unity's Seed field.
+    public void NewSeed() => _seed = Random.Shared.Next(1, 1_000_000);
+
+    public string ToJson() =>
+        $"{{\"seed\":{(_seed == 0 ? "null" : _seed.ToString())},\"extend\":{(_extend ? "true" : "false")}}}";
 }
 
 class TextStore

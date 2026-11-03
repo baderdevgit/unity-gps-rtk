@@ -25,6 +25,13 @@
   #wallBtn:active { background:#6c3483; }
   #clearWallsBtn { background:#7f8c8d; }
   #clearWallsBtn:active { background:#616a6b; }
+  #mazeBtn { background:#16a085; }
+  #mazeBtn:active { background:#117a65; }
+  #clearMazeBtn { background:#7f8c8d; }
+  #clearMazeBtn:active { background:#616a6b; }
+  #mazeInfo { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-top:10px; text-align:left; }
+  #mazeExtendLabel { display:flex; align-items:center; gap:8px; }
+  #mazeExtend { width:22px; height:22px; accent-color:#16a085; margin:0; }
   #recordToggleBtn.recording { background:#7f8c8d; }
   #recordToggleBtn.recording:active { background:#616a6b; }
   #status { margin-top:8px; color:#9a9; }
@@ -54,7 +61,14 @@
   <button id="wallBtn">Spawn Wall</button>
   <button id="clearWallsBtn">Clear Walls</button>
 </div>
-<button id="recordToggleBtn">Start Recording</button>
+<div class="row">
+  <button id="mazeBtn">Generate Maze</button>
+  <button id="clearMazeBtn">Clear Maze</button>
+</div>
+<div id="mazeInfo">
+  <span>Seed: <span id="mazeSeed">-</span></span>
+  <label id="mazeExtendLabel"><input type="checkbox" id="mazeExtend"> Extend at exit</label>
+</div>
 <div id="gridSizeRow">
   <label for="gridSizeSlider">Grid Cells: <span id="gridSizeValue">5</span></label>
   <input type="range" id="gridSizeSlider" min="1" max="40" step="1" value="5">
@@ -62,6 +76,7 @@
 <div id="status"></div>
 <div id="gps">Waiting for fix...</div>
 <ul id="loggedList" style="display:none"></ul>
+<button id="recordToggleBtn">Start Recording</button>
 <script>
   const params = new URLSearchParams(location.search);
   const token = params.get('token') || '';
@@ -83,7 +98,13 @@
   // preview at well under 1fps no matter how often Unity uploaded.
   let pollTimer = null;
   function startStream() {
-    preview.src = '/snapshot.mjpeg?token=' + encodeURIComponent(token);
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    // The timestamp makes this a new URL, since assigning the same src again
+    // wouldn't reconnect.
+    preview.src = '/snapshot.mjpeg?token=' + encodeURIComponent(token) + '&t=' + Date.now();
   }
 
   // Fallback to the original still-polling if the stream can't be held open
@@ -98,15 +119,25 @@
 
   startStream();
 
+  // A stream cut off by the server going away blanks the image without firing
+  // any event on it, so the 1.5s GPS poll below doubles as the way to notice:
+  // once a request has failed, the next one to get through reconnects it.
+  let serverLost = false;
+
   const gps = document.getElementById('gps');
   async function refreshGps() {
     try {
       const res = await fetch('/gps.json?token=' + encodeURIComponent(token) + '&t=' + Date.now());
+      if (serverLost) {
+        serverLost = false;
+        startStream();
+      }
       if (!res.ok) return;
       const fix = await res.json();
       gps.textContent = `Lat: ${fix.lat.toFixed(7)}  Lon: ${fix.lon.toFixed(7)}  (${fix.fixStatus})`;
     } catch (e) {
       // leave last-known value on screen rather than blanking it
+      serverLost = true;
     }
   }
   setInterval(refreshGps, 1500);
@@ -189,6 +220,62 @@
       status.textContent = res.ok ? 'Walls cleared.' : 'Failed: ' + res.status;
     } catch (e) {
       status.textContent = 'Error: ' + e;
+    }
+  };
+
+  const mazeSeed = document.getElementById('mazeSeed');
+  const mazeExtend = document.getElementById('mazeExtend');
+  function showMaze(state) {
+    mazeSeed.textContent = state.seed === null ? '-' : state.seed;
+    mazeExtend.checked = state.extend;
+  }
+
+  async function refreshMaze() {
+    try {
+      const res = await fetch('/maze.json?token=' + encodeURIComponent(token) + '&t=' + Date.now());
+      if (res.ok) showMaze(await res.json());
+    } catch (e) {
+      // leave the current values on screen
+    }
+  }
+  refreshMaze();
+
+  document.getElementById('mazeBtn').onclick = async () => {
+    status.textContent = 'Generating maze...';
+    try {
+      const res = await fetch('/generate-maze?token=' + encodeURIComponent(token), { method: 'POST' });
+      if (res.ok) {
+        const state = await res.json();
+        showMaze(state);
+        status.textContent = 'Maze generated (seed ' + state.seed + ').';
+      } else {
+        status.textContent = 'Failed: ' + res.status;
+      }
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  document.getElementById('clearMazeBtn').onclick = async () => {
+    status.textContent = 'Clearing maze...';
+    try {
+      const res = await fetch('/clear-maze?token=' + encodeURIComponent(token), { method: 'POST' });
+      status.textContent = res.ok ? 'Maze cleared.' : 'Failed: ' + res.status;
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+    }
+  };
+
+  mazeExtend.onchange = async () => {
+    const enabled = mazeExtend.checked;
+    status.textContent = 'Updating maze...';
+    try {
+      const res = await fetch('/maze-extend?token=' + encodeURIComponent(token) + '&enabled=' + (enabled ? 1 : 0), { method: 'POST' });
+      status.textContent = res.ok ? (enabled ? 'Maze will extend at the exit.' : 'Maze extending off.') : 'Failed: ' + res.status;
+      if (!res.ok) mazeExtend.checked = !enabled;
+    } catch (e) {
+      status.textContent = 'Error: ' + e;
+      mazeExtend.checked = !enabled;
     }
   };
 
