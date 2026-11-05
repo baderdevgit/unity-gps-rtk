@@ -17,3 +17,6 @@ PiScript/terminalcommands.txt
 # gps_log.jsonl lives under bin/ at runtime, so it's covered by this too.
 bin/
 obj/
+
+# ESP32 WiFi credentials and server token
+GpsRelay/src/secrets.h

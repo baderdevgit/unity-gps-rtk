@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 const int piPort = 5002;
 const int unityPort = 5001;
 const int webPort = 5003;
+const int relayPort = 5004;
 
 // Shared secret for the mobile web UI's /reset and /snapshot endpoints,
 // since this server is reachable from the internet. Set it via:
@@ -35,6 +36,7 @@ var loggedPositionsLock = new object();
 var snapshots = new SnapshotStore();
 var latestFix = new TextStore();
 var maze = new MazeState();
+var relay = new RelayState();
 
 // Unity runs on this same PC, so the Server->Unity hop is loopback traffic -
 // no "connection" to accept/track at all under UDP, just a fixed
@@ -43,7 +45,8 @@ var maze = new MazeState();
 var unityEndpoint = new IPEndPoint(IPAddress.Loopback, unityPort);
 var unitySendClient = new UdpClient();
 
-_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, maze, loggedPositionsPath, loggedPositionsLock));
+_ = Task.Run(() => RunWebServer(webPort, authToken, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, maze, relay, loggedPositionsPath, loggedPositionsLock));
+_ = Task.Run(() => RunRelayListener(relayPort, relay));
 await RunPiListener(piPort, unityEndpoint, unitySendClient, latestFix, gpsLogPath, gpsLogLock);
 
 static async Task RunPiListener(int port, IPEndPoint unityEndpoint, UdpClient unitySendClient, TextStore latestFix, string gpsLogPath, object gpsLogLock)
@@ -114,6 +117,28 @@ static async Task RunPiListener(int port, IPEndPoint unityEndpoint, UdpClient un
     }
 }
 
+// Unity's collision state, as "1" or "0". Bound to loopback only: Unity is on
+// this machine, and nothing off it should be able to switch the relays.
+static async Task RunRelayListener(int port, RelayState relay)
+{
+    var udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, port));
+    Console.WriteLine($"Listening for Unity's collision state on UDP port {port}...");
+
+    while (true)
+    {
+        try
+        {
+            var result = await udp.ReceiveAsync();
+            relay.Update(result.Buffer.Length == 1 && result.Buffer[0] == (byte)'1');
+        }
+        catch (SocketException)
+        {
+            // Windows reports a send to a closed port as an error on the next
+            // receive. Harmless here, since the state simply goes stale.
+        }
+    }
+}
+
 static void SendToUnity(string message, IPEndPoint unityEndpoint, UdpClient unitySendClient)
 {
     byte[] data = Encoding.UTF8.GetBytes(message);
@@ -127,7 +152,7 @@ static void SendToUnity(string message, IPEndPoint unityEndpoint, UdpClient unit
     }
 }
 
-static async Task RunWebServer(int port, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, MazeState maze, string loggedPositionsPath, object loggedPositionsLock)
+static async Task RunWebServer(int port, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, MazeState maze, RelayState relay, string loggedPositionsPath, object loggedPositionsLock)
 {
     var listener = new HttpListener();
     listener.Prefixes.Add($"http://+:{port}/");
@@ -147,11 +172,11 @@ static async Task RunWebServer(int port, string token, string indexHtml, IPEndPo
     while (true)
     {
         var ctx = await listener.GetContextAsync();
-        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, maze, loggedPositionsPath, loggedPositionsLock));
+        _ = Task.Run(() => HandleWebRequest(ctx, token, indexHtml, unityEndpoint, unitySendClient, snapshots, latestFix, maze, relay, loggedPositionsPath, loggedPositionsLock));
     }
 }
 
-static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, MazeState maze, string loggedPositionsPath, object loggedPositionsLock)
+static async Task HandleWebRequest(HttpListenerContext ctx, string token, string indexHtml, IPEndPoint unityEndpoint, UdpClient unitySendClient, SnapshotStore snapshots, TextStore latestFix, MazeState maze, RelayState relay, string loggedPositionsPath, object loggedPositionsLock)
 {
     try
     {
@@ -354,6 +379,15 @@ static async Task HandleWebRequest(HttpListenerContext ctx, string token, string
                 await StreamSnapshots(res, snapshots);
                 break;
 
+            case "/relay.stream":
+                if (req.QueryString["token"] != token)
+                {
+                    await WriteResponse(res, 403, "text/plain", Encoding.UTF8.GetBytes("Forbidden"));
+                    break;
+                }
+                await StreamRelayState(res, relay, req.RemoteEndPoint?.ToString() ?? "unknown");
+                break;
+
             case "/gps.json":
                 if (req.QueryString["token"] != token)
                 {
@@ -516,6 +550,49 @@ static async Task StreamSnapshots(HttpListenerResponse res, SnapshotStore snapsh
     }
 }
 
+// Held open by the ESP32. Sends the state the moment it changes and every 200ms
+// regardless: the repeats are what let the ESP32 tell a quiet link from a dead
+// one, and also make this write fail soon after the ESP32 disappears.
+static async Task StreamRelayState(HttpListenerResponse res, RelayState relay, string viewer)
+{
+    res.StatusCode = 200;
+    res.ContentType = "text/plain";
+    res.SendChunked = true;
+    res.Headers["Cache-Control"] = "no-store";
+
+    var stream = res.OutputStream;
+    var on = Encoding.ASCII.GetBytes("R1\n");
+    var off = Encoding.ASCII.GetBytes("R0\n");
+    bool? lastSent = null;
+    var sinceSend = System.Diagnostics.Stopwatch.StartNew();
+    Console.WriteLine($"Relay board connected from {viewer}.");
+
+    try
+    {
+        while (true)
+        {
+            bool state = relay.IsOn;
+            if (state != lastSent || sinceSend.ElapsedMilliseconds >= 200)
+            {
+                await stream.WriteAsync(state ? on : off);
+                await stream.FlushAsync();
+                if (state != lastSent && lastSent != null)
+                    Console.WriteLine($"Relay {(state ? "ON" : "OFF")}.");
+                lastSent = state;
+                sinceSend.Restart();
+            }
+            await Task.Delay(10);
+        }
+    }
+    catch (HttpListenerException) { /* board went away */ }
+    catch (IOException) { /* connection dropped mid-write */ }
+    finally
+    {
+        Console.WriteLine($"Relay board disconnected ({viewer}).");
+        try { res.Close(); } catch { }
+    }
+}
+
 static async Task WriteResponse(HttpListenerResponse res, int statusCode, string contentType, byte[] body)
 {
     res.StatusCode = statusCode;
@@ -564,6 +641,24 @@ class MazeState
 
     public string ToJson() =>
         $"{{\"seed\":{(_seed == 0 ? "null" : _seed.ToString())},\"extend\":{(_extend ? "true" : "false")}}}";
+}
+
+// Whether the relays should be on, as last reported by Unity. Goes off by itself
+// once Unity stops reporting, so stopping Play mode or a crash can't leave them on.
+class RelayState
+{
+    private const long StaleAfterMs = 500;
+
+    private volatile bool _on;
+    private long _updatedAt;
+
+    public void Update(bool on)
+    {
+        _on = on;
+        Interlocked.Exchange(ref _updatedAt, Environment.TickCount64);
+    }
+
+    public bool IsOn => _on && Environment.TickCount64 - Interlocked.Read(ref _updatedAt) < StaleAfterMs;
 }
 
 class TextStore
